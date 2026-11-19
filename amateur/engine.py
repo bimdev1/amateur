@@ -24,11 +24,17 @@ from .processes import (
     WhiteboardRegulator,
     Digester,
 )
+from .stores import BaseCore, DebrisPool, ElasticBoard, MultiLayerMat
 
 
 @dataclass(frozen=True)
 class Loop:
-    """Declarative wiring of the v0.10 architecture."""
+    """Declarative wiring of the v0.10 architecture.
+
+    Every node of the DFD is a field here: entities E1/E2, processes
+    P1-P6, stores D1-D4. A wiring that cannot name its stores is not a
+    wiring.
+    """
 
     environment: ExternalReality
     gardener: Gardener
@@ -38,6 +44,10 @@ class Loop:
     regulator: WhiteboardRegulator
     digester: Digester
     ratchet: Ratchet
+    board: ElasticBoard
+    mat: MultiLayerMat
+    debris: DebrisPool
+    base_core: BaseCore
 
     def blueprint(self) -> tuple[Flow, ...]:
         """The 26-flow wiring this loop is contractually bound to."""

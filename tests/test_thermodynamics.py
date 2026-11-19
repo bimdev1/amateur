@@ -17,6 +17,12 @@ class TestThermodynamics(unittest.TestCase):
     def setUp(self) -> None:
         self.edges = ledger.edges()
 
+    def _flows_from(self, node: str) -> list[str]:
+        return [flow for src, flow, _ in self.edges if src == node]
+
+    def _flows_to(self, node: str) -> list[str]:
+        return [flow for _src, flow, dst in self.edges if dst == node]
+
     def test_entities_only_touch_the_blanket(self) -> None:
         for src, flow, dst in self.edges:
             if src in ENTITY_SHORTS:
@@ -25,9 +31,8 @@ class TestThermodynamics(unittest.TestCase):
                 self.assertEqual(src, "P1", msg=f"flow '{flow}' bypasses P1")
 
     def test_perturbation_does_not_instruct(self) -> None:
-        by_source = {src: [f for s, f, _ in self.edges if s == src] for src, _, _ in self.edges}
-        self.assertEqual(by_source["E1"], ["Perturbations"])
-        self.assertEqual(by_source["E2"], ["Gradients"])
+        self.assertEqual(self._flows_from("E1"), ["Perturbations"])
+        self.assertEqual(self._flows_from("E2"), ["Gradients"])
 
     def test_exhaust_is_the_only_degenerate_outflow(self) -> None:
         entropy_flows = [f for _, f, _ in self.edges if "Entropy" in f]
@@ -53,8 +58,14 @@ class TestThermodynamics(unittest.TestCase):
                 self.assertNotIn("(read)", flow, msg=f"read marked as write: {flow}")
 
     def test_base_core_curvature_is_nearly_fixed(self) -> None:
-        self.assertEqual(ledger.inbound(ledger.D4), ("Sedimented Invariants",))
-        self.assertEqual(ledger.outbound(ledger.D4), ("Base Ops (read)",))
+        self.assertEqual(self._flows_to("D4"), ["Sedimented Invariants"])
+        self.assertEqual(self._flows_from("D4"), ["Base Ops (read)"])
+
+    def test_entity_directions_are_asymmetric(self) -> None:
+        self.assertEqual(ledger.outbound(ledger.E1), ("Perturbations",))
+        self.assertEqual(ledger.inbound(ledger.E1), ("Active Probes", "Entropy Exhaust"))
+        self.assertEqual(ledger.outbound(ledger.E2), ("Gradients",))
+        self.assertEqual(ledger.inbound(ledger.E2), ("Crystallized Output",))
 
 
 class TestRoutingBiasOnly(unittest.TestCase):
