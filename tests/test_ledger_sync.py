@@ -17,6 +17,7 @@ DFD_PATH = ROOT / "v0.10-untested.md"
 
 TABLE_ROW = re.compile(r"^\| (\d+) \| (.+?) \| (.+?) \| (.+?) \|$")
 MERMAID_EDGE = re.compile(r"^    (\w+) -->\|\"(.+?)\"\| (\w+)$")
+MERMAID_NODE = re.compile(r"^\s+(\w+)[\[\(]")
 
 
 def parse_table(text: str) -> list[tuple[int, str, str, str]]:
@@ -44,6 +45,14 @@ class TestLedgerSync(unittest.TestCase):
         rows = parse_table(self.dfd)
         expected = [(f.fid, f.source, f.flow, f.target) for f in ledger.FLOW_LEDGER]
         self.assertEqual(rows, expected)
+
+    def test_mermaid_declares_every_node(self) -> None:
+        declared = {
+            m[1]
+            for line in self.dfd.splitlines()
+            if (m := MERMAID_NODE.match(line))
+        }
+        self.assertEqual(declared, set(ledger.NODE_NAMES))
 
     def test_flow_ids_are_dense(self) -> None:
         fids = [f.fid for f in ledger.FLOW_LEDGER]
