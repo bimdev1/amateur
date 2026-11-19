@@ -12,7 +12,12 @@ from typing import Any, ClassVar
 
 @dataclass(frozen=True)
 class FlowEvent:
-    """One traversal of one ledger edge."""
+    """One traversal of one ledger edge.
+
+    Hash semantics are tuple-like: equality compares class and payload,
+    so the hashability of an event is the payload's responsibility —
+    an unhashable payload makes the event unhashable.
+    """
 
     payload: Any
     FLOW_ID: ClassVar[int]
