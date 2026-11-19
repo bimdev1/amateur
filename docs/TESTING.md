@@ -42,12 +42,35 @@ shape for *all* ticks, not just sampled ones:
 | `boxes_master`  | for `t >= 1`, depth profile is exactly `{10: 1, 17: 1}`, zero elsewhere |
 | `misses_master` | cumulative misses are exactly one on each cycle, frozen after tick 1 |
 | `sunk_master`   | `sIter t i = t` for the sinks (#2, #4, #5), 0 elsewhere |
+| `applyOp_step` / `fold_balance` / `flow_balance` | per-flow conservation: box' + sunk' + attempted consumes is fixed by the word's emit weight |
+| `emit_liveness` | per-op table: every flow's word emits exactly once (fids 1..26) |
+| `consume_sink_split` | per-op table: every flow either consumes once or is a sink (fids 1..26) |
+| `balance_at_master` | at the master profile, box' + sunk' + consumes = fbox i + 1 per flow |
 
 Proof architecture: per-flow *warm* facts (one tick from zero) and *step*
 facts (one tick from the master profile) — the concrete fid arms discharge
 by kernel `rfl`, the case split over fids is one 27-arm match plus a tail
-arm — then four short tick-inductions. No axioms, no `sorry`; core Lean 4
-only.
+arm — then short tick-inductions plus a fold induction over op words. No
+axioms, no `sorry`; core Lean 4 only.
+
+## Master invariant matrix (INV-*)
+
+How each user-supplied master invariant is currently verified:
+
+| INV-id | Status | Where |
+| --- | --- | --- |
+| INV-BOUNDS | proven | Lean `boxes_bounded` |
+| INV-LIVENESS | proven + empirical + structural | Lean `emit_liveness`; `test_invariants.TestLiveness` |
+| INV-CYCLE-DELAY | proven | Lean `boxes_master` |
+| INV-CONSERVE | proven per-flow + empirical system-wide | Lean `flow_balance`, `balance_at_master`; `test_accounting` identity |
+| INV-EXHAUST | proven | Lean `sunk_master` |
+| INV-CAUSAL | structural | `test_invariants.TestCausal` |
+| INV-GEOMETRY | structural (factual writer sets) | `test_invariants.TestGeometry`; D1/D3 operational writes flagged pending adjudication |
+| INV-NO-OSSIFY | deferred | needs payload semantics (stale-overlay epochs) |
+| INV-EMPTINESS | deferred | needs payload semantics (typed D4 records) |
+| INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` |
+| INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` |
+| INV-CENSUS | structural + empirical | `test_recurrence` census; per-store counts flagged pending adjudication |
 
 Lockstep chain (nothing is trusted twice):
 
@@ -71,7 +94,7 @@ Regenerate the Lean file after touching the ledger or the spine:
 python3 tools/gen_lean.py > formal/DryRun.lean
 ```
 
-## Layer 3 — Empirical bookkeeping (`test_dryrun.py`, `test_accounting.py`)
+## Layer 3 — Empirical bookkeeping (`test_dryrun.py`, `test_accounting.py`, `test_invariants.py`)
 
 The executor (`DryRun`) is checked against conservation-style laws over
 real runs: liveness (all 26 flows fire every tick), the conservation

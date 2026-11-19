@@ -60,10 +60,34 @@ def opsOf : Nat -> List Op
   | 26 => [Op.emit, Op.consume]
   | _ => []
 
+/-- Per-op weights: exactly one emit / consume in the corresponding op. -/
+def isE : Op → Nat
+  | .emit => 1
+  | _ => 0
+
+def isC : Op → Nat
+  | .consume => 1
+  | _ => 0
+
+/-- Number of emit ops in a word. -/
+def emitCount : List Op → Nat
+  | [] => 0
+  | op :: rest => isE op + emitCount rest
+
+/-- Number of consume ops in a word (absorbs compile to consume). -/
+def consumeCount : List Op → Nat
+  | [] => 0
+  | op :: rest => isC op + consumeCount rest
+
+/-- One flow's mailbox through a word of ops. -/
+def flowFold : List Op → Nat × Nat × Nat → Nat × Nat × Nat
+  | [], acc => acc
+  | op :: rest, acc => flowFold rest (applyOp acc.1 acc.2.1 acc.2.2 op)
+
 /-- One tick of one flow's mailbox from depth `x`:
 returns (box', misses, sunk). -/
 def tickFlow (i x : Nat) : Nat × Nat × Nat :=
-  (opsOf i).foldl (fun acc op => applyOp acc.1 acc.2.1 acc.2.2 op) (x, 0, 0)
+  flowFold (opsOf i) (x, 0, 0)
 
 /-- Depth accumulator, tick-indexed, from an all-zero start. -/
 def bIter : Nat -> Nat -> Nat
@@ -261,4 +285,138 @@ theorem boxes_bounded : ∀ t i : Nat, bIter t i ≤ 1 := by
   · have h := boxes_master t i (by omega)
     rw [h]
     exact fbox_le i
+
+/-- Single-op balance: box + sunk plus consume-weight is conserved up
+through emits and misses. -/
+theorem applyOp_step (b m s : Nat) (o : Op) :
+    (applyOp b m s o).1 + (applyOp b m s o).2.2 + isC o + m
+      = b + s + isE o + (applyOp b m s o).2.1 := by
+  cases o <;> by_cases h : b = 0 <;> simp [applyOp, isC, isE, h] <;> omega
+
+/-- The fold-wide balance invariant with anchored counters: from any
+mailbox state, result box + sunk + consumed attempts + incoming misses
+is fixed by the word's emit/consume weights. -/
+theorem fold_balance : ∀ (l : List Op) (b m s c _e : Nat),
+    m ≤ (flowFold l (b, m, s)).2.1 ∧
+    (flowFold l (b, m, s)).1 + (flowFold l (b, m, s)).2.2
+      + (c + consumeCount l) + m
+      = (b + s + c) + emitCount l + (flowFold l (b, m, s)).2.1 := by
+  intro l
+  induction l with
+  | nil =>
+      intro b m s c _e
+      refine ⟨Nat.le_refl _, ?_⟩
+      simp only [flowFold, consumeCount, emitCount]
+      omega
+  | cons op rest ih =>
+      intro b m s c _e
+      have ihb := ih (applyOp b m s op).1 (applyOp b m s op).2.1
+        (applyOp b m s op).2.2 c _e
+      have hop := applyOp_step b m s op
+      have hmono : m ≤ (applyOp b m s op).2.1 := by
+        cases op <;> by_cases h : b = 0 <;> simp [applyOp, isC, isE, h] <;> omega
+      have hfish : flowFold rest (applyOp b m s op)
+          = flowFold rest ((applyOp b m s op).1,
+              (applyOp b m s op).2.1, (applyOp b m s op).2.2) := rfl
+      rw [hfish] at ihb
+      constructor
+      · show m ≤ (flowFold rest (applyOp b m s op)).2.1
+        rw [hfish]
+        omega
+      · show (flowFold rest (applyOp b m s op)).1
+            + (flowFold rest (applyOp b m s op)).2.2
+            + (c + (isC op + consumeCount rest)) + m
+          = (b + s + c) + (isE op + emitCount rest)
+            + (flowFold rest (applyOp b m s op)).2.1
+        rw [hfish]
+        omega
+
+theorem flow_balance : ∀ (i x : Nat),
+    (tickFlow i x).1 + (tickFlow i x).2.2 + consumeCount (opsOf i)
+      = x + emitCount (opsOf i) + (tickFlow i x).2.1 := by
+  intro i x
+  simpa using (fold_balance (opsOf i) x 0 0 0 0).2
+
+/-- INV-LIVENESS: every ledger flow emits exactly once per tick. -/
+theorem emit_liveness : ∀ i : Nat, 1 ≤ i → i < 27 → emitCount (opsOf i) = 1 := by
+  intro i h1 hi
+  match i with
+  | 0 => omega
+  | 1 => rfl
+  | 2 => rfl
+  | 3 => rfl
+  | 4 => rfl
+  | 5 => rfl
+  | 6 => rfl
+  | 7 => rfl
+  | 8 => rfl
+  | 9 => rfl
+  | 10 => rfl
+  | 11 => rfl
+  | 12 => rfl
+  | 13 => rfl
+  | 14 => rfl
+  | 15 => rfl
+  | 16 => rfl
+  | 17 => rfl
+  | 18 => rfl
+  | 19 => rfl
+  | 20 => rfl
+  | 21 => rfl
+  | 22 => rfl
+  | 23 => rfl
+  | 24 => rfl
+  | 25 => rfl
+  | 26 => rfl
+  | j + 27 => omega
+
+/-- Every flow either consumes or drains as a sink, exactly once. -/
+theorem consume_sink_split : ∀ i : Nat, 1 ≤ i → i < 27 →
+    consumeCount (opsOf i) + fsinkone i = 1 := by
+  intro i h1 hi
+  match i with
+  | 0 => omega
+  | 1 => rfl
+  | 2 => rfl
+  | 3 => rfl
+  | 4 => rfl
+  | 5 => rfl
+  | 6 => rfl
+  | 7 => rfl
+  | 8 => rfl
+  | 9 => rfl
+  | 10 => rfl
+  | 11 => rfl
+  | 12 => rfl
+  | 13 => rfl
+  | 14 => rfl
+  | 15 => rfl
+  | 16 => rfl
+  | 17 => rfl
+  | 18 => rfl
+  | 19 => rfl
+  | 20 => rfl
+  | 21 => rfl
+  | 22 => rfl
+  | 23 => rfl
+  | 24 => rfl
+  | 25 => rfl
+  | 26 => rfl
+  | j + 27 => omega
+
+/-- INV-CONSERVE, per flow at the master profile: box' + sunk' +
+attempted consumes = fbox i + 1. Combined with `boxes_master` over the
+fid set this is the executor's conservation identity. -/
+theorem balance_at_master : ∀ i : Nat, 1 ≤ i → i < 27 →
+    (tickFlow i (fbox i)).1 + (tickFlow i (fbox i)).2.2
+      + consumeCount (opsOf i)
+      = fbox i + 1 := by
+  intro i h1 hi
+  have hb := flow_balance i (fbox i)
+  have he := emit_liveness i h1 hi
+  have hc := consume_sink_split i h1 hi
+  have h1 := step_box i
+  have h2 := step_miss i
+  have h3 := step_sunk i
+  omega
 

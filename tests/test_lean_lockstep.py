@@ -83,6 +83,16 @@ class TestTableParity(unittest.TestCase):
                 expected = "consume" if py_op == "absorb" else py_op
                 self.assertEqual(lean_op, expected, msg=f"#{fid}")
 
+    def test_arms_satisfy_liveness_and_sink_split(self) -> None:
+        for fid, ops in self.arms.items():
+            self.assertEqual(
+                ops.count("emit"), 1, msg=f"#{fid} liveness"
+            )
+            expected_consume = 0 if fid in SINK_FLOWS else 1
+            self.assertEqual(
+                ops.count("consume"), expected_consume, msg=f"#{fid}"
+            )
+
     def test_profile_markers_name_the_cycle_and_sink_flows(self) -> None:
         text = FORMAL.read_text()
         fbox = re.search(r"def fbox.*", text).group(0)
@@ -151,6 +161,12 @@ class TestLeanCompiles(unittest.TestCase):
             "boxes_master",
             "misses_master",
             "sunk_master",
+            "applyOp_step",
+            "fold_balance",
+            "flow_balance",
+            "emit_liveness",
+            "consume_sink_split",
+            "balance_at_master",
         ):
             self.assertRegex(text, rf"\btheorem {name}\b")
 

@@ -13,10 +13,11 @@ Domain results asserted here:
 - Over the interior subgraph, the node-canonical simple cycles are
   exactly the expected seventeen: the perception loop through P1, the
   whiteboard pair (P4, P5), and per store D, the loops that close
-  through it — D1 in six (down to the bare D1<->P4 pair), D2 in three
-  (including the bare D2<->P6 pair), D3 in three (including the bare
-  D3<->P5 pair), D4 in two (both full arcs through P2 and P3: the Base
-  Core is the only store with no short loop).
+  through it. Raw membership is D1 in seven, D2 in four, D3 in four,
+  D4 in three (each store's cycles include its bare D<->P pair except
+  D4, and three cycles bridge D1 through P6 into D2/D3/D4); membership
+  counts overlap there, which sums to twenty over seventeen distinct
+  cycles. The Base Core D4 is the only store with no 2- or 3-hop loop.
 - Thermodynamic law at the boundary: every simple cycle of the full
   graph that touches an entity necessarily carries both a fresh input
   (#1 or #3) and a lateral output (#2, #4, or #5). The driving gradient
@@ -161,6 +162,19 @@ class TestRecurrentStructure(unittest.TestCase):
 
     def test_interior_cycle_census(self) -> None:
         self.assertEqual(simplecycles(adjacency(INTERIOR_FLOWS)), EXPECTED_CYCLES)
+
+    def test_inv_census_per_store_cycle_counts(self) -> None:
+        counts = {
+            store: sum(store in cycle for cycle in EXPECTED_CYCLES)
+            for store in ("D1", "D2", "D3", "D4")
+        }
+        self.assertEqual(counts, {"D1": 7, "D2": 4, "D3": 4, "D4": 3})
+
+    def test_inv_census_d4_has_no_short_loops(self) -> None:
+        d4_hops = {
+            len(cycle) for cycle in EXPECTED_CYCLES if "D4" in cycle
+        }
+        self.assertEqual(d4_hops & {2, 3}, set(), msg=str(d4_hops))
 
     def test_no_interior_cycle_touches_an_entity(self) -> None:
         for cycle in simplecycles(adjacency(INTERIOR_FLOWS)):
