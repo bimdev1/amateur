@@ -151,10 +151,12 @@ admissible patch is `K < 0.13` parameters — i.e. none.
 * Sensitivity table: gain at `H in {4, 8, 16, 20, 36, 100, 1000, 10^4,
   10^5}` and at both `sigma²` variants, on the trace's own numbers.
 
-**Adjudication status:** `kappa` and `H` are pre-registered here and are
-submitted to the user's adjudication; the 12a verdicts are reported as
-provisional under this constant, and a changed constant means a re-run,
-not a re-reading.
+**Adjudication status: RATIFIED (user, 2026-11-20, before the 12a
+measurement runs).** `kappa = 934.7982054975386`, `H = 20`, cost `32K`,
+strict inequality — exactly as pre-registered; the ratified form is the
+Gaussian-NLL exchange at the model's in-distribution variance, amortised
+over the registered episode. No constant was changed after ratification;
+a changed constant would mean a re-run, not a re-reading.
 
 ## 4. Trigger — evidence sufficiency replaces the absolute tick guard
 
