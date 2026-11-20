@@ -832,6 +832,12 @@ class BoardStore:
     (§9.10).  All preconditions are checked before the first mutation, so
     a refused operation leaves the state digest byte-identical, records no
     eviction, and leaves ``last_commit`` unchanged (§9.11a).
+
+    Commits are monotone (§9.14.5): ``apply`` refuses ``op.tick <=
+    last_commit``, so the resident slots are appended in strictly
+    increasing born-tick order.  ``slot_state`` therefore publishes
+    ``slot_ids``/``oldest_slot_id`` in born-tick order by construction, not
+    by dict-insertion accident.
     """
 
     def __init__(self, capacity: int = BOARD_CAPACITY) -> None:
@@ -887,6 +893,16 @@ class BoardStore:
                 f"#13 provenance must be (13, {op.tick}), got {provenance!r}"
             )
 
+        # Monotone commit order (§9.14.5): the ledger has one #13 per tick,
+        # so a stale or equal tick would make "oldest" an insertion accident
+        # rather than a born-tick fact.  Refuse before any mutation.
+        last = self.last_commit
+        if last is not None and op.tick <= last:
+            raise ValueError(
+                "#13 commits must strictly increase; the ledger has one #13 "
+                f"per tick (op tick {op.tick} <= last_commit {last})"
+            )
+
         # Validate every precondition before mutating anything (atomicity).
         if op.op == "write":
             if len(self._slots) >= self._capacity:
@@ -932,7 +948,15 @@ class BoardStore:
         """The #14 state snapshot, or None before the first committed #13.
 
         A board emptied by erasures/evictions still reports its capacity and
-        history (it is a non-empty *state*, just an empty resident set).
+        history (it is a non-empty *state*, just an empty resident set);
+        "empty" here means *never committed*, not zero residents (§9.14.2).
+
+        ``slot_ids`` order is the resident born-tick order.  That is a
+        structural fact, not an assertion: ``apply`` is the only mutator, it
+        refuses ``op.tick <= last_commit``, and a ``write`` only appends, so
+        resident insertion order and born-tick order cannot diverge through
+        this class's public surface (§9.14.5).  The ordering is pinned by
+        tests rather than by dead defensive code here.
         """
         if self._last_provenance is None:
             return None

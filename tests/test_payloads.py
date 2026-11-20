@@ -766,6 +766,85 @@ class TestBoardStore(unittest.TestCase):
             store.apply(self._resize(3, 1), Provenance(13, 3))
         self.assertEqual(store.state_digest(), before)
 
+    def test_stale_and_equal_tick_commits_are_refused_atomically(self) -> None:
+        """§9.14.5: one #13 per tick; monotone commits, no mutation on refusal."""
+        store = BoardStore()
+        store.apply(self._write(2, "a"), Provenance(13, 2))
+        before = (
+            store.state_digest(),
+            store.evictions(),
+            store.last_commit,
+            store.slots(),
+            store.slot_state(),
+        )
+        for tick, op in (
+            (1, self._write(1, "b")),
+            (2, self._write(2, "b")),
+            (1, self._evict(1, "a")),
+            (2, self._erase(2, "a")),
+        ):
+            with self.assertRaises(ValueError, msg=repr(op)):
+                store.apply(op, Provenance(13, tick))
+            after = (
+                store.state_digest(),
+                store.evictions(),
+                store.last_commit,
+                store.slots(),
+                store.slot_state(),
+            )
+            self.assertEqual(before, after, msg=repr(op))
+        self.assertEqual(store.last_commit, 2)
+        self.assertEqual(
+            [slot.slot_id for slot in store.slots()], ["a"]
+        )
+
+    def test_oldest_is_born_tick_order_across_evict_then_write(self) -> None:
+        """Not insertion accident: resident born ticks stay strictly ordered."""
+        store = BoardStore()
+        for tick, slot_id in ((1, "a"), (2, "b"), (3, "c")):
+            store.apply(
+                self._write(tick, slot_id), Provenance(13, tick)
+            )
+        self.assertEqual(
+            [slot.born_tick for slot in store.slots()], [1, 2, 3]
+        )
+        store.apply(self._evict(4, "a"), Provenance(13, 4))
+        store.apply(self._write(5, "d"), Provenance(13, 5))
+        born = [slot.born_tick for slot in store.slots()]
+        self.assertEqual(born, sorted(born))
+        self.assertEqual(born, [2, 3, 5])
+        state = store.slot_state()
+        assert state is not None
+        self.assertEqual(state.slot_ids, ("b", "c", "d"))
+        self.assertEqual(state.oldest_slot_id, "b")  # surviving oldest
+        self.assertNotEqual(state.oldest_slot_id, "d")  # not the newest
+
+        # Erasing a middle slot then writing keeps born-tick order.
+        store.apply(self._erase(6, "c"), Provenance(13, 6))
+        store.apply(self._write(7, "e"), Provenance(13, 7))
+        born = [slot.born_tick for slot in store.slots()]
+        self.assertEqual(born, sorted(born))
+        state = store.slot_state()
+        assert state is not None
+        self.assertEqual(state.slot_ids, ("b", "d", "e"))
+        self.assertEqual(state.oldest_slot_id, "b")
+        self.assertEqual(state.occupied, len(state.slot_ids))
+
+    def test_born_ticks_are_strictly_increasing_in_slot_state(self) -> None:
+        store = BoardStore()
+        store.apply(self._write(1, "a"), Provenance(13, 1))
+        store.apply(self._write(2, "b"), Provenance(13, 2))
+        store.apply(self._evict(3, "a"), Provenance(13, 3))
+        store.apply(self._write(4, "c"), Provenance(13, 4))
+        born = [slot.born_tick for slot in store.slots()]
+        self.assertEqual(born, sorted(set(born)))
+        state = store.slot_state()
+        assert state is not None
+        self.assertEqual(
+            state.slot_ids,
+            tuple(slot.slot_id for slot in store.slots()),
+        )
+
     def test_provenance_guard(self) -> None:
         store = BoardStore()
         before = store.state_digest()

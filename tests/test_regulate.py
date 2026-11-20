@@ -22,6 +22,7 @@ import unittest
 
 import amateur.regulate as regulate
 from amateur.payloads import (
+    BOARD_OP_VERBS,
     BoardOpBody,
     BoardStore,
     CostErrorBody,
@@ -148,6 +149,16 @@ class TestP4EvidenceDependence(unittest.TestCase):
         self.assertEqual(op.op, "evict")
         self.assertEqual(metrics.cost, 4096.0)
 
+    def test_cost_is_pre_op_and_not_a_projection(self) -> None:
+        """§9.14.6: cost is the #14 evidence, not cost + the same-tick write."""
+        slots = _state(occupied=2, nbytes=1024)
+        op, metrics = Regulator().regulate(_delta(), slots, 4)
+        self.assertEqual(op.op, "write")
+        self.assertEqual(metrics.cost, float(slots.nbytes))
+        self.assertNotEqual(
+            metrics.cost, float(slots.nbytes + op.nbytes)
+        )
+
     def test_content_digest_is_stable_and_hexadecimal(self) -> None:
         delta = _delta()
         digest = content_digest(delta)
@@ -159,6 +170,29 @@ class TestP4EvidenceDependence(unittest.TestCase):
         delta = _delta()
         self.assertEqual(represented_bytes(delta), 8 * len(delta.delta))
         self.assertGreater(represented_bytes(delta), 0)
+
+
+class TestP4OperatorVerbBoundary(unittest.TestCase):
+    """§9.14.3: resize/erase are schema-legal but never policy-emitted."""
+
+    def test_regulator_emits_only_write_or_evict(self) -> None:
+        self.assertEqual(
+            set(BOARD_OP_VERBS), {"write", "erase", "resize", "evict"}
+        )
+        scenarios = (
+            None,
+            _state(occupied=0, nbytes=0, slot_ids=(), oldest_slot_id=None),
+            _state(occupied=2, nbytes=1024),
+            _state(occupied=8, nbytes=4096),
+        )
+        for slots in scenarios:
+            op, _metrics = Regulator().regulate(_delta(), slots, 5)
+            self.assertIn(op.op, {"write", "evict"}, msg=repr(slots))
+
+    def test_resize_and_erase_are_not_reachable_from_policy(self) -> None:
+        source = inspect.getsource(Regulator.regulate)
+        self.assertNotIn('"resize"', source)
+        self.assertNotIn('"erase"', source)
 
 
 class TestP4NoConstantAudit(unittest.TestCase):

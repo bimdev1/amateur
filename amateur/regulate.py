@@ -20,6 +20,12 @@ computed as ``8 * len(delta)`` and ``cost`` is the sum of the stored slots'
 represented bytes; neither is a hard-coded latent-width byte count or any
 other state literal (§9.5, §9.11b).  The clock only names a write slot; it
 does not decide the branch or the content digest.
+
+``#16.cost`` is the **pre-op** occupancy reported by ``#14``: this
+regulator runs before the same tick's ``#13`` arrives in the executor, so
+the post-commit occupancy becomes visible as the next tick's ``#14``.  A
+"cost + nbytes" projection would be a prediction, not derivation, and is
+deliberately not made (§9.14.6).
 """
 from __future__ import annotations
 
@@ -75,6 +81,13 @@ class Regulator:
         slots: SlotStateBody | None,
         tick: int,
     ) -> tuple[BoardOpBody, CostErrorBody]:
+        """Derive (#13, #16) from the #12 and #14 evidence.
+
+        Only ``write`` and ``evict`` are ever emitted; ``resize``/``erase``
+        are schema-legal operator verbs but are not reachable from this
+        policy (Lead adjudication §9.14.3).  ``#16.cost`` is the pre-op
+        ``#14`` byte total, not a post-op projection (§9.14.6).
+        """
         if type(delta) is not StateDeltaBody:
             raise TypeError(
                 f"P4 needs an exact StateDeltaBody, got {type(delta).__name__}"
