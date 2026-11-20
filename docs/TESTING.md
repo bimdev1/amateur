@@ -260,8 +260,9 @@ How each user-supplied master invariant is currently verified:
 | INV-ATOMIC (round 8; round 9a) | tested (fail-closed) | record+patch atomicity on every path: capacity, byte ceiling, organ-driven evict; round 9a refuses `patch="full"` at the capacity gate **before any fit/overlay**, and the outer byte-ceiling path is exercised with a synthetic oversized patch (asserted in the derivation pass before any arrival, no state change); `MatBoard` guard rails (validate-before-pop revalidation, duplicate-birth rejection, exactly-one `evict_record`); `test_payloads.TestMatBoardGuardRails`/`TestMatBoardPatches`, `test_physics_run.TestFullPatchModeFailsClosed` | enduring (Python); Lean bounds records only |
 | INV-CAPACITY (round 9a) | derivation + tests (arithmetic; not proved in Lean) | `K ≤ γ·N·D` with γ=5.0, N = real evidence transitions used, D=64 (`amateur/physics/capacity.py`); last-layer low-rank patch `K(r)=192r+64`, `r_max=min(floor((γND−D)/192),64)`, `nbytes=4K`; N=4 → rank 6 / K=1,216 / 4,864 B; N=16 → rank 26 / K=5,056 / 20,224 B; N≥64 → rank 64 / K=12,352 / 49,408 B; dense 34,240 and full 210,920 refused at every N; outer byte ceilings are storage bounds only; `test_physics_capacity` (11) | physics epoch; γ=5.0 is pre-registered design slack, not measured; not proved in Lean |
 | INV-VALIDATION (round 9a) | tested (state-based; no-peek asserted) | pre-adoption proposal at frame 16; paired candidate-vs-base validation on held-out ticks 17–18 of the same stream; birth only if `candidate_mean < base_mean` strictly, decision at 18; rejection record reason `interference` with both means; no birth/activation on reject; `test_physics_organ.TestPreAdoptionValidation`, `test_physics_run.TestPreAdoptionValidation` | physics epoch; `validation_window=2` == `stale_patience` (documented); one candidate at a time; trigger-gating (9b) not in scope; **scope: executor proposal path only** — the organ's legacy ratchet birth path (`_decide_tick → _adopt_or_revalidate → _fit_overlay → birth`) remains unvalidated, and the 0.8226 bank ratio is a fit-quality diagnostic, not validation evidence (design §15.3, notes 40–41) |
+| INV-ADAPTATION / ADMISSION (round 9a; pre-registered closeout) | tested (one trace, two gates) | design §15.10 definitions: **ADAPTATION** = mean adapted/base over overlay-active ∩ `phase == "flipped"` rows < 1.0 — seed-7 frames 19–27 (n=9), 0.25469933084115787 / 0.2635077436765035 = **0.9665724706513396** → **PASS**; **ADMISSION** = mean adapted/base over **all** overlay-active rows < 1.0 — frames 19–32 (n=14), 0.3444968502626556 / 0.3293016486402069 = **1.0461437156029878** → **FAIL**, the round's primary finding (the 2-tick validation admitted a patch whose bounded lifetime harm exceeded its benefit; the online stale rule protected the trace, validation did not). Both computed from the same trace; `forward_ratio` = ADMISSION, `forward_ratio_flip_only` = ADAPTATION; `test_physics_run.TestSingleStreamAcceptance.test_adaptation_gate_passes_on_the_flipped_window` pins ADAPTATION, the strict `@expectedFailure` on `...test_single_stream_surprise_drops` pins ADMISSION | physics epoch; admission policy deferred to Round 9c (gating changes the birth regime; re-measure lifetime net benefit under the gated cadence first) |
 | INV-RESET (round 8; round 9a) | tested | `PhysicsOrgan.reset_p6_state()` clears decisions/pending/cooldown/gate evidence/overlay table/fit history; `PhysicsRun.reset()` calls it; two consecutive `acceptance()` runs are identical (round 9a: proposal 16, birth 18, stale 31, evict 35, all-active 1.0461437156029878, flip-only 0.9665724706513396, 11 D4 sediments, clean end state); `test_physics_run.TestResetRepeatability` | enduring (harness contract); needed for the registered trace to be repeatable |
-| INV-ZERO-CONF (round 8; round 9a) | tested by serialized-bytes equality + identity B | #22 is the **derived** gate output (Q4-A): it passes only when an overlay is active and cumulative adapted < base evidence exists, confidence `clamp(1-adapted/base,0,1)`; production publishes evidence after `stale_patience` (2) applied ticks, disclosed. Round 9a's capacity-bounded patch is genuinely beneficial while active, so the gate passes on **real** evidence: 11 real sediments (frames 21–31), 25 confidence-0 no-ops, `11+25=36`; the retained prefix is byte-identical and object-identical (no test double), and the gate blocks again after eviction. `test_physics_run.TestZeroConfidenceGate` (8 tests) | physics epoch; the passing branch is now real, not injected |
+| INV-ZERO-CONF (round 8; round 9a) | tested by serialized-bytes equality + identity B | #22 is the **derived** gate output (Q4-A): it passes only when an overlay is active and cumulative adapted < base evidence exists, confidence `clamp(1-adapted/base,0,1)`; production publishes evidence after `stale_patience` (2) applied ticks, disclosed. Round 9a's capacity-bounded patch is genuinely beneficial while active, so the gate passes on **real** evidence: 11 real sediments (frames 21–31), 25 confidence-0 no-ops, `11+25=36`; the retained prefix is byte-identical and object-identical (no test double), and the gate blocks again after eviction. **D4 criterion adjudicated (2026-11-20): the retained-contents reading is correct and met; the round-8 "no writes at all" reading is rejected** (it contradicts the ratchet's purpose and would need an executor dedup rule; design §15.10). `test_physics_run.TestZeroConfidenceGate` (8 tests) | physics epoch; the passing branch is now real, not injected; D4 reading closed |
 | INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` | enduring |
 | INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` | plumbing-only in current form (inherits LIVENESS's cadence); enduring form follows the spine-scoped liveness |
 | INV-CENSUS | resolved (raw membership, adjudicated) | `test_recurrence` census: \|Cycles(D1)\|=7 (entangled hub), \|Cycles(D2)\|=4, \|Cycles(D3)\|=4, \|Cycles(D4)\|=3 with zero 2-/3-hop loops — D4's structural insulation | enduring (pure topology) |
@@ -494,8 +495,8 @@ or seed selection was made for the registered trace.
 | candidate vs base, validation | 0.13386843726038933 vs 0.1474553719162941 → **0.9078573097790045** |
 | decision / birth | **birth** at frame 18 (strict pass) |
 | active ticks | 14 (frames 19–32) |
-| adapted / base, active **flipped** ticks (19–27) | 0.25469933084115787 / 0.2635077436765035 = **0.9665724706513396** |
-| adapted / base, **all** active ticks | 0.3444968502626556 / 0.3293016486402069 = **1.0461437156029878** |
+| adapted / base, active **flipped** ticks (19–27) — **ADAPTATION** gate | 0.25469933084115787 / 0.2635077436765035 = **0.9665724706513396** → **PASS** |
+| adapted / base, **all** active ticks (19–32) — **ADMISSION** gate | 0.3444968502626556 / 0.3293016486402069 = **1.0461437156029878** → **FAIL** |
 | adapted / base, active recovered ticks (28–32) | 0.5061323852213514 / 0.44773067757487295 = **1.1304393702991506** |
 | stale / evict | finalized tick 31 / executor tick 35 (record+patch together) |
 | end state | D2 residents and patches `()`, patch bytes 0 |
@@ -503,20 +504,24 @@ or seed selection was made for the registered trace.
 | encoder | bit-identical after the fit (`torch.equal`) |
 | rejection trace (seed 0) | validations 17–18: 0.19090842455625534 vs 0.13387499749660492 = **1.4260200046771003**; `interference` at 18; no birth/activation; D2 empty, patch bytes 0; D4 byte-identical |
 | reassessed bank fit | 0.8225682511949177 (old 0.690× quarantined: dense-patch artifact) |
-| suite / Lean | 312 tests, OK (1 expected failure); `gen_lean` byte-identical |
+| suite / Lean | 313 tests, OK (1 expected failure); `gen_lean` byte-identical |
 
 Honest reading: the validation gate passes on the registered trace and the
 organ's stale/evict rule removes the patch on the flip-back harm — the
 "stale/evict on a failure trace" requirement is met by the real trace. The
-acceptance criterion's wording is now material: the literal "active flip
-window" reading is 0.9666 (< 1.0), while the previously registered
-all-active reading is 1.0461 (> 1.0). The strict `expectedFailure` is kept
-on the registered all-active metric until the user adjudicates; selecting
-another seed after seeing the result would be seed-shopping and was not
-done (13 of the first 31 seeds reject, 18 birth; the rejection test uses
-seed 0, the first natural seed, not a re-registered acceptance). Full
-derivation, per-tick trace and honesty notes in
-[phase4-5-design.md](phase4-5-design.md) §15.
+closeout ruling (2026-11-20) pre-registers two gates over this one trace:
+**ADAPTATION PASS** (0.9666 over the active flipped ticks) and
+**ADMISSION FAIL** (1.0461 over all active ticks) — the failure is the
+round's primary finding (the 2-tick validation admitted a patch whose
+bounded lifetime harm outweighed its benefit; the stale rule, not
+validation, protected the trace). The strict `expectedFailure` stays on
+ADMISSION until admission policy is set in Round 9c; selecting another seed
+after seeing the result would be seed-shopping and was not done (13 of the
+first 31 seeds reject, 18 birth; the rejection test uses seed 0, the first
+natural seed, not a re-registered acceptance). The D4 reading is adjudicated
+(retained-contents, met). Full derivation, per-tick trace, gate definitions
+and honesty notes in [phase4-5-design.md](phase4-5-design.md) §15.10 (and
+§15.4–§15.9).
 
 *Correction provenance (round-9a audit): this file is Lead-owned.  It was
 edited by the implementer in commit `e6d6051` contrary to the task contract
@@ -524,7 +529,10 @@ that said "Do NOT edit `docs/TESTING.md` (Lead owns)"; the Lead reviewed that
 change and adopts it.  The audit corrections on this page — the
 `TestZeroConfidenceGate` 8-test count, the INV-VALIDATION scope caveat and
 the "round 8 record" label — were applied by the implementer under explicit
-Lead delegation (shared-board task 8, docs-only).*
+Lead delegation (shared-board task 8, docs-only); the round-9a closeout
+edits here — two pre-registered gates, adjudicated D4 reading, 313-test
+count — were applied under the same explicit delegation (shared-board
+task 9, docs + one test only).*
 
 ## What each layer catches that the others cannot
 

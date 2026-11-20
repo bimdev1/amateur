@@ -1116,11 +1116,11 @@ window (0.9666× over the active flipped ticks) but *hurts* after the flip
 back (1.1304× over the active recovered ticks), so the registered
 all-active ratio is **1.0461** — still above 1.0, and
 `test_single_stream_surprise_drops` therefore remains a strict recorded
-expected failure (see note 29).  The capacity bound is what changed the
-magnitude: the dense head+norm patch measured **1.2614** on the round-8
-trace, the rank-26 `head.2` patch measures **1.0461**.  The patch is
-directly useful for nine ticks, and the organ's own staleness rule catches
-it on the two harmful flip-back ticks (30, 31) and evicts it.
+expected failure (see note 29 and §15.10).  The capacity bound is what
+changed the magnitude: the dense head+norm patch measured **1.2614** on
+the round-8 trace, the rank-26 `head.2` patch measures **1.0461**.  The
+patch is directly useful for nine ticks, and the organ's own staleness
+rule catches it on the two harmful flip-back ticks (30, 31) and evicts it.
 
 ### 15.5 The measured rejection trace (seed 0)
 
@@ -1207,20 +1207,21 @@ ends empty.
 | oversized synthetic patch refused in the derivation pass | `...TestFullPatchModeFailsClosed.test_oversized_synthetic_patch_fails_in_the_derivation_pass` |
 | real gate sediments (11, ticks 21–31), non-vacuous D4 retention (retained prefix byte- and object-identical), gate blocked again after eviction | `test_physics_run.TestZeroConfidenceGate` (8) |
 | P6 reset: two accepted traces identical (birth 18, stale 31, evict 35, 1.0461437156029878) | `test_physics_run.TestResetRepeatability` (2) |
-| single-stream drop (recorded failure, re-justified) | `...test_single_stream_surprise_drops` (`expectedFailure`) |
+| ADAPTATION gate: active ∩ flipped ratio < 1.0, recomputed from the rows | `test_physics_run.TestSingleStreamAcceptance.test_adaptation_gate_passes_on_the_flipped_window` |
+| ADMISSION gate: single-stream drop (recorded failure, strict `< 1.0`) | `...test_single_stream_surprise_drops` (`expectedFailure`) |
 
 ### 15.9 Honesty notes (Round 9a, continuing from note 28)
 
-29. **The registered trace still misses the acceptance criterion, and the
-    criterion's wording is now material.**  Over *every* active tick the
-    seed-7 ratio is **1.0461437156029878** (> 1.0, so the recorded
-    expected failure stands, unweakened).  Over the active *flipped* ticks
-    only — the reading "mean adapted/base over the active flip window" —
-    it is **0.9665724706513396** (< 1.0).  Both are reported; the strict
-    test keeps the registered all-active metric because that is what round
-    8 measured and silently switching the metric after seeing the results
-    would be moving the goalposts.  **This is a question for the Lead/user,
-    not a decision taken here.**  Selecting a different seed (seeds 3, 12,
+29. **The registered trace still misses ADMISSION; ADAPTATION passes.**
+    (Adjudicated 2026-11-20; the two pre-registered gates are §15.10.)
+    Over *every* active tick the seed-7 **ADMISSION** ratio is
+    **1.0461437156029878** (> 1.0, FAIL).  Over the active *flipped* ticks
+    only the **ADAPTATION** ratio is **0.9665724706513396** (< 1.0, PASS).
+    The earlier framing treated these as competing readings of one
+    criterion; the closeout ruling makes them two gates answering two
+    questions (failure window vs lifetime).  The strict recorded expected
+    failure therefore stays on ADMISSION, unweakened and unscoped — not
+    moved to the passing gate.  Selecting a different seed (seeds 3, 12,
     21, 25, 26, 30 measure ratios 0.905–0.988 under the same registered
     policy) would also be seed-shopping and was not done.
 30. **The registered seed-7 trace does not reject.**  The contract expected
@@ -1243,22 +1244,22 @@ ends empty.
     many stored parameters one evidence transition may buy; nothing in this
     round measures the optimal value.  The outer byte ceilings are storage
     bounds only and were never reached by the admissible patch.
-33. **The #22 gate now really passes, and D4 grows.**  Because the
-    validation-passed patch is genuinely beneficial while active, the
+33. **The #22 gate now really passes, and D4 grows.**
+    (Adjudicated 2026-11-20; the D4 reading is pinned in §15.10.)  Because
+    the validation-passed patch is genuinely beneficial while active, the
     gate's cumulative evidence passes from tick 21 (confidences
     0.024529555468589148 → 0.008894601...) and the store sediments **11**
     real `BiasPrimitive` bodies; the other 25 ticks are confidence-0 no-ops
     (11 + 25 = 36 settled writes).  The literal "D4 bytes identical"
     criterion is therefore **not met** on this trace (the list grows by 11
-    legitimate gate outputs); the *retained-contents* invariant **is**
-    met (the retained prefix is byte-identical and object-identical —
-    `test_retained_invariant_survives_the_scenario`).  Under the round-8
-    "no D4 writes" reading this needs an adjudication: either the criterion
-    means retained-contents (safe), or #22 needs a one-shot/dedup rule,
-    which would be an executor/ops change outside 9a's physics-side scope.
-    Reported, not silently reinterpreted.  This also supersedes notes 23
-    and 26 (the empty-vs-empty D4 snapshot and the "gate never passes"
-    claim).
+    legitimate gate outputs); the *retained-contents* invariant is the
+    adjudicated criterion and **is** met (the retained prefix is
+    byte-identical and object-identical —
+    `test_retained_invariant_survives_the_scenario`).  The round-8 "no D4
+    writes" reading is **rejected**: it contradicts the ratchet's purpose
+    and would require an executor dedup rule, an ops change outside 9a's
+    physics-side scope.  This also supersedes notes 23 and 26 (the
+    empty-vs-empty D4 snapshot and the "gate never passes" claim).
 34. **The round-8 "retained invariant" test-double is gone.**  The
     non-vacuous retention test now seeds nothing: it drives the real
     registered trace, snapshots D4 at the first real sediment (tick 21,
@@ -1275,12 +1276,13 @@ ends empty.
     cooldown expires (§15.7).  This is a trigger-gating defect surfaced by
     the cleaner low-rank fit (the dense refit failed with `no-improvement`),
     explicitly out of 9a's scope; it is pinned as measured behaviour.
-37. **Timings (measured, 8 CPU threads, this machine).**  Focused:
-    `test_physics_capacity` 11 tests / 0.001 s; `test_physics_organ` 26
-    tests / 16.57 s; `test_physics_run` 37 tests / 8.21 s.  Combined physics
-    suites: **74 tests, OK, 22.97 s, 1 expected failure**.  Full suite with
+37. **Timings (measured, 8 CPU threads, this machine; round-9a closeout
+    re-run).**  Focused: `test_physics_capacity` 11 tests / 0.002 s;
+    `test_physics_organ` 26 tests / 19.28 s; `test_physics_run` 38
+    tests / 11.10 s.  Combined physics suites: **75 tests, OK, 26.92 s,
+    1 expected failure**.  Full suite with
     `LEAN_BIN=$PWD/.work/lean4/bin/lean python3 -m unittest discover -s
-    tests -t .`: **312 tests, OK (1 expected failure), 44.34 s**.
+    tests -t .`: **313 tests, OK (1 expected failure), 51.42 s**.
     `python3 tools/gen_lean.py` exit 0 and byte-identical to
     `formal/DryRun.lean`; `formal/` and `tools/` untouched.  **`docs/TESTING.md`
     was *not* untouched**: it was modified in commit `e6d6051` (+86 lines)
@@ -1349,3 +1351,65 @@ ends empty.
     the admission predicate, not a behaviour bug: the fit path refuses
     `max_rank < 1` and records `capacity` / `no-evidence`.  Recorded as
     found; no code was changed in this correction.
+
+### 15.10 Pre-registered gates: ADAPTATION and ADMISSION (round 9a closeout)
+
+Round 9a's phrase "mean adapted/base over the active flip window" conflated
+two different questions.  The user's closeout ruling (2026-11-20)
+pre-registers them as two gates with exact, computational definitions, both
+computed from the one registered trace (seed 7, `PhysicsRun.acceptance()`)
+and both reported in the summary:
+
+- **active** row: `row.overlay_id is not None` — the overlay was applied.
+- **flipped** row: `row.phase == "flipped"`.
+- **ADAPTATION** = mean(adapted surprise over *active ∩ flipped* rows) /
+  mean(base surprise over the same rows); PASS iff < 1.0.  The
+  failure-window question: does the patch help while the dynamics it was
+  fitted for persist?  (`summary["forward_ratio_flip_only"]`.)
+- **ADMISSION** = mean(adapted surprise over *all active* rows) /
+  mean(base surprise over the same rows); PASS iff < 1.0.  The lifetime
+  question: does the patch help over the whole time it is resident?
+  (`summary["forward_ratio"]`.)
+
+No frame range is hardcoded: the sets are the intersection of the two
+predicates above, so a gate survives edits to the trace length or the flip
+cadence.
+
+| Gate | Tick set (seed 7) | adapted mean / base mean | Ratio | Status |
+| --- | --- | --- | --- | --- |
+| ADAPTATION | active ∩ flipped: frames 19–27 (n=9) | 0.25469933084115787 / 0.2635077436765035 | **0.9665724706513396** | **PASS** |
+| ADMISSION | all active: frames 19–32 (n=14) | 0.3444968502626556 / 0.3293016486402069 | **1.0461437156029878** | **FAIL** |
+
+**Round 9a official status: ADAPTATION PASS, ADMISSION FAIL.**
+
+The ADMISSION failure is the round's primary finding, not bookkeeping: the
+2-tick pre-adoption validation admitted a patch whose bounded lifetime harm
+exceeded its benefit.  The online stale rule protected the trace (stale at
+31, evicted at 35); validation did not.  A patch can be right about the
+dynamics it was fitted for and still harm on net — admission is a lifetime
+question and needs a lifetime test.
+
+**Admission policy is deferred to Round 9c.**  Trigger-gating (Round 9b)
+changes the birth regime, so the lifetime net benefit must be re-measured
+under the gated cadence before any admission rule (longer validation window,
+expected-lifetime check, or a different staleness rule) is chosen.  This
+section pre-registers the *measurement*, not the policy.
+
+**Pinning.**  `test_physics_run.TestSingleStreamAcceptance.test_adaptation_gate_passes_on_the_flipped_window`
+recomputes the ADAPTATION ratio independently from the per-tick rows (the
+predicate intersection, not the summary field), asserts it is < 1.0, and
+cross-checks it against the summary value.  The ADMISSION gate stays a
+strict `@expectedFailure` on `...test_single_stream_surprise_drops`
+(`< 1.0`, unweakened) and now names the gate it pins.  Neither test reads a
+hardcoded frame list.
+
+**D4 reading (adjudicated 2026-11-20).**  The correct criterion is
+*retained contents byte-identical* and it **is met**: 11 real gate-passed
+sediments (first at frame 21), the retained prefix byte- and
+object-identical through tick 36, 25 absorbed confidence-0 no-ops, identity
+B every tick — Q4 demonstrated non-vacuously.  The "no writes at all"
+reading is **rejected**: it contradicts the ratchet's purpose (a gate that
+never passes is not a gate) and would require an executor dedup rule, an
+ops-table change outside the physics epoch.  This adjudication supersedes
+the open question in note 33 and cannot be re-litigated by re-reading note
+23.

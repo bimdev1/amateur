@@ -640,8 +640,9 @@ class TestSingleStreamAcceptance(unittest.TestCase):
         self.assertLess(stale, eviction)
         self.assertGreater(summary["active_ticks"], 0)
         # The harm that triggers staleness is measured on the flip-back ticks:
-        # the patch is beneficial over the flipped window (0.9666) and harmful
-        # on the recovered phase (the all-active ratio 1.0461 is above 1).
+        # the patch is beneficial over the flipped window (ADAPTATION gate
+        # 0.9666, PASS) and harmful on the recovered phase (ADMISSION gate
+        # 1.0461, FAIL — see design §15.10 for the pre-registered definitions).
         self.assertLess(summary["forward_ratio_flip_only"], 1.0)
         self.assertGreater(summary["forward_ratio"], 1.0)
         self.assertEqual(self.runner.organ.overlay_table.records(), ())
@@ -677,22 +678,51 @@ class TestSingleStreamAcceptance(unittest.TestCase):
         self.assertLessEqual(self.runner.dry.debris.__len__(), DEBRIS_CAPACITY)
         self.assertLessEqual(self.runner.dry.debris.byte_size(), DEBRIS_MAX_BYTES)
 
+    def test_adaptation_gate_passes_on_the_flipped_window(self) -> None:
+        """ADAPTATION gate (pre-registered, design §15.10) — PASS.
+
+        Computed independently from the per-tick rows: the ADAPTATION set is
+        the overlay-active rows (``overlay_id is not None``) whose ``phase``
+        is ``"flipped"`` — the intersection of two predicates, not a
+        hardcoded frame range — and the ratio is mean adapted / mean base
+        over that set.  The summary field is then cross-checked, so the trace
+        remains the single source of truth.  ADMISSION (all active ticks) is
+        the separate failing gate, pinned by the ``@expectedFailure`` below.
+        """
+        rows = [
+            row
+            for row in self.result.ticks
+            if row.overlay_id is not None and row.phase == "flipped"
+        ]
+        self.assertEqual(len(rows), 9)
+        adapted = sum(row.surprise for row in rows) / len(rows)
+        base = sum(row.base_surprise for row in rows) / len(rows)
+        ratio = adapted / base
+        self.assertAlmostEqual(ratio, 0.9665724706513396, places=12)
+        self.assertLess(ratio, 1.0)
+        self.assertAlmostEqual(
+            ratio, self.result.summary["forward_ratio_flip_only"], places=12
+        )
+
     @unittest.expectedFailure
     def test_single_stream_surprise_drops(self) -> None:
-        """RECORDED FAILURE: the registered trace still misses the criterion.
+        """RECORDED FAILURE: the ADMISSION gate still fails on the trace.
 
-        Round 9a re-measured this on the registered seed-7 trace: the
-        validation-gated rank-26 patch is born at tick 18 (validation
-        0.133868 vs base 0.147455, ratio 0.9079) and the adapted/base ratio
-        over every active tick is 1.0461 (improved from 1.2614 with the
-        dense patch, but still above 1.0).  Over the active *flipped* ticks
-        only it is 0.9666, i.e. the patch helps during the failure window
-        and hurts after the flip-back, where the ratchet stales and evicts
-        it.  The assertion is deliberately kept strict on the registered
-        metric: breaking 1.0 over every active tick has not been measured
-        on the registered trace, and selecting a different seed after seeing
-        the results would be seed-shopping.  Do not weaken this to "no
-        material harm"; if the policy changes, re-measure.
+        ADMISSION (pre-registered, design §15.10) is the mean adapted/base
+        ratio over *all* overlay-active ticks.  Round 9a measured it on the
+        registered seed-7 trace: the validation-gated rank-26 patch is born
+        at tick 18 (validation 0.133868 vs base 0.147455, ratio 0.9079) and
+        the all-active ratio is 1.0461 (improved from 1.2614 with the dense
+        patch, but still above 1.0), so admission FAILS.  Over the active
+        *flipped* ticks only (the separate ADAPTATION gate) it is 0.9666,
+        i.e. the patch helps during the failure window and hurts after the
+        flip-back, where the ratchet stales and evicts it.  This failure is
+        the round's primary finding: the 2-tick validation admitted a patch
+        whose bounded lifetime harm outweighed its benefit; the online stale
+        rule protected the trace, not the validation.  The assertion is
+        deliberately kept strict on the pre-registered admission metric;
+        do not weaken it to "no material harm" or to the ADAPTATION
+        window — admission policy is deferred to Round 9c.
         """
         self.assertLess(self.result.summary["forward_ratio"], 1.0)
 
