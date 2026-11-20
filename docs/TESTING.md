@@ -592,7 +592,7 @@ MDL exchange, user-ratified **before** the runs).
 | trigger (N_MIN=2) | seed 7 births **t12** (was t19 — the reversal of the Round-11 verdict is the round's primary finding); seed 0 births **t9**, K=2,752 |
 | motif thresholds (derived 2/2, criterion M) | seed 7: 0 motif cohorts; seed 0: live half fires (2 motif ids, `ovr-02`/`ovr-03`, stale/evict) |
 | null suite (seed 7, pre-registered) | 0 promotions for zero/random/shuffled with **and** without the floor; zero exactly neutral (ratio 1.0, dbar 0.0); `no_flip` vacuous (no spike) |
-| post-hoc seed-0 null probe | real 0.983203 **promoted pre-floor**; zero 1.0, random 1.0456, shuffled 1.1263 never qualified — stop condition did not fire (post-hoc, not a gate) |
+| post-hoc seed-0 null probe | at the shared t14 decision point (n=5): real **0.983203 promoted pre-floor**, zero 1.000000, random 1.005290, shuffled 1.050450 — no null ever qualified at any tick; the separator is the qualification test, not the floor; stop condition did not fire (post-hoc, not a gate) |
 | housekeeping | two named mass accounts; dead `#21` `drift` payload field deleted; coverage audit `docs/round12a-audit.md` (#1 blocked, #2/#4/#5/#9 not-yet-derived, #13 transport-only) |
 
 **Open convention issue recorded, not resolved.** ADAPTATION's tick set

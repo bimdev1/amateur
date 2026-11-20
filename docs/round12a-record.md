@@ -182,19 +182,33 @@ pre-floor, so that comparison is 0-vs-0. The only pre-floor promotion in
 re-run on seed 0, floor ablated, clearly labelled POST-HOC
 (`.work/round12a/seed0_nulls.json`):
 
-| run (seed 0, ablated) | birth | final residence ratio | promoted |
-| --- | --- | --- | --- |
-| real fitted | t9 | 0.983203 @ t14 (then resident to t36) | **yes @ t14** |
-| zero | t9 | 1.000000 (exactly) | no |
-| random | t9 | 1.045558 | no |
-| shuffled | t9 | 1.126322 | no |
-| no_flip | — | — (no spike, no birth) | no |
+| run (seed 0, ablated) | birth | ratio at the shared t14 decision point (n=5) | final ratio | promoted |
+| --- | --- | --- | --- | --- |
+| real fitted | t9 | **0.983203** | 1.086455 @ t36 (resident) | **yes @ t14** |
+| zero | t9 | 1.000000 (exactly) | 1.000000 | no |
+| random | t9 | 1.005290 | 1.045558 | no |
+| shuffled | t9 | 1.050450 | 1.126322 | no |
+| no_flip | — | — (no spike, no birth) | — | no |
 
-**The stop condition did not fire:** no null ever dipped below 1.0 over 27
-ticks of evidence, while the real candidate did at t14. The pre-floor gate
-discriminated on the only trace where it promoted. The probe is post-hoc and
-is not pre-registered evidence; it is reported because it is the direct test
-of the user's stop condition.
+**The stop condition did not fire:** no null ever dipped below 1.0 at any
+tick from 10 to 36, while the real candidate did at t14 (n=5). Three caveats
+must travel with that sentence:
+
+* the separation at the decision point is produced by the **pre-existing
+  qualification test** (strict ratio < 1.0 over at least `RESIDENCE_N`
+  out-of-sample ticks), **not by the new floor** — no null was ever
+  qualified, so seed 0 (like seed 7) cannot demonstrate the floor refusing
+  *qualified* noise; the only qualified candidate there is the real one;
+* the real qualification is a **single-tick flicker** at n=5 with a ~2.2 %
+  margin against the closest null, not a population;
+* on the completed floor-on trace the real seed-0 candidate is
+  **indistinguishable from `null_random`** by ADAPTATION (1.03211 vs 1.02657,
+  both n=18); the apparent signal exists only at the t14 decision point.
+
+The exactly-neutral zero control is held out by **strict inequality alone**
+(ratio exactly 1.0 is not `< 1.0`); with `<=` it would qualify. The probe is
+post-hoc and is not pre-registered evidence; it is reported because it is the
+direct test of the user's stop condition.
 
 ## 6. Findings
 
@@ -215,11 +229,14 @@ of the user's stop condition.
    organ probe's by 2,154×. Break-even horizons are 10^4–10^6 ticks. The
    honest state is: the protection works and the learning is not earning its
    description cost.
-4. **The gate discriminates on the one trace where it promoted.** Seed 0's
-   real candidate qualified at 0.9832 while three null constructions never
-   qualified over 27 ticks (zero exactly 1.0; random 1.0456; shuffled
-   1.1263). Post-hoc, but it is the direct test of "is the pass noise?" — the
-   answer is no, and the margin is thin (5 ticks).
+4. **The gate discriminates once, on the one trace where it promoted.** Seed
+   0's real candidate qualified at 0.9832 (t14, n=5) while three null
+   constructions never qualified at any tick (zero exactly 1.0; random 1.0053;
+   shuffled 1.0505 at the same decision point). The discriminator is the
+   *qualification test*, not the floor (no null reached the floor qualified),
+   the margin is a single 5-tick window, and on the completed trace the real
+   candidate is indistinguishable from `null_random` by ADAPTATION. Post-hoc,
+   not pre-registered.
 5. **The seed-7 null suite is uninformative by construction.** The real
    fitted candidate is harmful there, so real = nulls = 0 promotions even
    ablated. The stop condition "if any null promotes, the seed-7 pass has no
