@@ -1,43 +1,71 @@
-"""Round 11 (wave 3): the LeWM physics run through the ledger executor.
+"""Round 12a: the LeWM physics run through the ledger executor.
 
 This module is the thin adapter between the physics organ
 (:mod:`amateur.physics.organ`) and the ledger executor (:class:`DryRun`)
-under the Round-11 contract (``docs/round11-contract.md`` §3.5 and §5).
+under the round-12a pre-registration (``docs/round12a-prereg.md``
+§1/§2/§3/§4/§6) and the Round-11 contract
+(``docs/round11-contract.md`` §3.5 and §5).
 
 PRE-REGISTERED GATES (written here, and in the module constants below,
-**before** any measurement; §5).  Both are computed from the same
-:class:`RunTick` rows / promotion log:
+**before** any measurement; round-12a prereg §2/§4/§5).  Both are computed
+from the same :class:`RunTick` rows / promotion log:
 
 ============  =======================================================  ========
 Gate          Definition                                               PASS iff
 ============  =======================================================  ========
-ADAPTATION    mean over ticks with ``phase == "flipped"`` **and** at    ``< 1.0``
-              least one shadow-scored resident candidate of
-              ``shadow adapted / base``
+ADAPTATION    **ratio-of-means** (prereg §2 primary) over the declared  ``< 1.0``
+              flipped-phase out-of-sample tick set:
+              ``sum_t adapted(t) / sum_t base(t)``, each tick's adapted
+              and base being the sum over its shadow-scored residents
 ADMISSION     count of **promoted** candidates (surfaced by ``#23``,    ``== 0``
               lineage-consumed by ``#22``) whose final residence
               ``ratio >= 1.0``
 ============  =======================================================  ========
 
-Pre-registered, **not** gates (§5(i)-(iii)): the seed-7 residence-evidence
-curve reported per resident tick as ``(candidate_id, residence_ticks,
-adapted_mean, base_mean, ratio, qualified)``; seed 0 as the rejection
-control with the expectation **zero promotions**; the live-overlay
-behaviour (#24 -> stale -> evict, D4 retained contents byte-identical,
-encoder bit-identical) reported as measured state.
+The secondary ADAPTATION statistic -- ``mean_t(adapted/base)`` -- is always
+reported and labelled: it is a diagnostic, never the gate (prereg §2).  The
+two declared tick sets (``adaptation``, ``with_in_sample``) and the
+``residence`` set are emitted explicitly in every summary; nothing is
+inferred from frame numbers.
 
-Registered scenario (§3.5): ``warmup=8``, gravity flip at frame 8,
+Pre-registered, **not** gates: the residence-evidence curve reported per
+resident tick as ``(candidate_id, residence_ticks, adapted_mean, base_mean,
+ratio, qualified)``; seed 0 as the rejection control with the expectation
+**zero promotions**; the live-overlay behaviour (#24 -> stale -> evict, D4
+retained contents byte-identical, encoder bit-identical) reported as
+measured state.
+
+Control surface (every summary labels which mode produced it):
+
+* the ``#22`` gate requires the pre-registered ``MDL_FLOOR`` by default
+  (``gain_floor="on"``); ``"ablate"`` is a DIAGNOSTIC-ONLY reconstruction of
+  the pre-floor round-11 gate (prereg §3/§6), never the registered path;
+* ``trigger="round11"`` is a HISTORICAL DIAGNOSTIC used only to reproduce
+  the Round-11 falsifier trace (birth t19, K=5,056, promotion t27); the
+  default ``"registered"`` is prereg §4;
+* ``patch_mode`` in ``{"fitted", "zero", "random", "shuffled"}`` selects the
+  candidate substance for the prereg §6 null controls.
+
+Registered scenario (prereg §3.5): ``warmup=8``, gravity flip at frame 8,
 ``post_flip=20``, flip back at frame 28, ``recovery=8`` -> 36 ticks.  The
 numbers are re-measured this round; no round 7-9a measurement is
 re-asserted.
 
-The single-stream regime cannot reach the ``#21`` -> ``#24`` live-overlay
-path: ``MOTIF_MIN_PERSISTENCE = 10`` was derived on a multi-stream bank, and
-one stream never accumulates that much support (measured: longest support
-streak 2, zero motif cohorts).  Per the Lead's binding ruling the constant
-is **not tuned**: the registered trace reports ``motif cohorts = 0`` and
-zero live-overlay events, and the full lifecycle is demonstrated by the
-organ-level 16-stream probe
+Evidence-sufficiency trigger (prereg §4): birth iff no fit was attempted
+yet, no live overlay is active, ``tick >= N_MIN`` and this tick's surprise
+is above the measured spike threshold.  ``N_MIN = 2`` replaces the old
+arbitrary ``tick >= fit_window (16)`` guard, and the fit consumes
+``min(fit_window, tick)`` real transitions so the capacity bound uses the
+actual evidence.  Consequence (recorded in prereg §4): seed 7 now births at
+its first spike, t12 (N=12, K=3,712), and seed 0 at t9 (N=9, K=2,752); the
+Round-11 trace (birth t19, K=5,056) is reproduced only by the labelled
+historical diagnostic mode, never by the registered path.
+
+The single-flip regime gives few repeated support runs.  Under the derived
+motif thresholds (prereg §5) the registered seed 7 produces no motif cohort
+and therefore no live-overlay event, while the seed-0 control may reach the
+``#21`` -> ``#24`` path; both are **measured state**, never gates.  The full
+lifecycle is demonstrated by the organ-level 16-stream probe
 (:meth:`amateur.physics.organ.PhysicsOrgan.nursery_scenario`), clearly
 labelled POST-HOC PROBE / NOT A GATE.
 
@@ -89,9 +117,12 @@ from ..provenance import Envelope, Provenance
 from .organ import (
     COHORT_KINDS,
     DEFAULT_FIT_WINDOW,
+    DEFAULT_NULL_SEED,
     DigestResult,
+    MDL_FLOOR,
     Observation,
     OverlayRecord,
+    PATCH_MODES,
     PhysicsOrgan,
     StructuralMotif,
 )
@@ -102,10 +133,12 @@ __all__ = [
     "CONTROL_SEED",
     "FLIP_AT",
     "FLIP_BACK_AT",
+    "N_MIN",
     "POST_FLIP",
     "RECOVERY",
     "REGISTERED_SEED",
     "TOTAL_TICKS",
+    "TRIGGERS",
     "WARMUP",
     "AcceptanceResult",
     "PhysicsRun",
@@ -115,14 +148,36 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# PRE-REGISTERED CONSTANTS (contract §5; fixed before measuring)
+# PRE-REGISTERED CONSTANTS (round-12a prereg §2/§4; fixed before measuring)
 # ---------------------------------------------------------------------------
-#: ADAPTATION gate threshold: PASS iff the flipped-phase mean shadow ratio
-#: is strictly below this value.
+#: ADAPTATION gate threshold: PASS iff the flipped-phase **ratio-of-means**
+#: over the out-of-sample tick set is strictly below this value (prereg §2).
 ADAPTATION_GATE: float = 1.0
 #: ADMISSION gate threshold: PASS iff exactly this many promoted candidates
 #: have a final residence ratio >= 1.0.
 ADMISSION_GATE: int = 0
+#: Evidence-sufficiency trigger (prereg §4): the smallest evidence with at
+#: least one transition to fit and at least one out-of-sample transition to
+#: test.  One transition has no held-out sample, and the capacity law already
+#: admits a rank-1 patch at ``N = 2`` (``K(1) = 192*1 + 64 = 256`` <=
+#: ``gamma*N*D = 5*2*64 = 640``).  Replaces the arbitrary
+#: ``tick >= fit_window (16)`` guard; the structural window passed to the fit
+#: is ``min(fit_window, tick)`` so the capacity bound uses the actual N.
+N_MIN: int = 2
+#: Gate modes (prereg §3): ``"on"`` is the registered round-12a path (the
+#: pre-registered :data:`amateur.physics.organ.MDL_FLOOR`).  ``"ablate"`` is
+#: a **DIAGNOSTIC-ONLY** reconstruction of the pre-floor round-11 gate, used
+#: to measure what the old gate would have admitted; it is never the
+#: registered path and every summary labels which mode produced it.
+GAIN_FLOOR_MODES = ("on", "ablate")
+DEFAULT_GAIN_FLOOR = "on"
+#: Trigger modes.  ``"registered"`` is prereg §4 (evidence sufficiency,
+#: ``N_MIN``); ``"round11"`` is the labelled **HISTORICAL DIAGNOSTIC**
+#: (``tick >= fit_window``) used only to reproduce the Round-11 falsifier
+#: trace (birth t19, K=5,056, promotion t27).  It is never reachable by
+#: default and the default is asserted at the source level.
+TRIGGERS = ("registered", "round11")
+DEFAULT_TRIGGER = "registered"
 #: The registered trace's seed.
 REGISTERED_SEED: int = 7
 #: The rejection-control seed (pre-registered expectation: zero promotions).
@@ -196,8 +251,26 @@ class PhysicsSource:
 
     mode = "physics"
 
-    def __init__(self, organ: PhysicsOrgan) -> None:
+    def __init__(
+        self, organ: PhysicsOrgan, *, gain_floor: str = DEFAULT_GAIN_FLOOR
+    ) -> None:
+        if gain_floor not in GAIN_FLOOR_MODES:
+            raise ValueError(
+                f"unknown gain_floor {gain_floor!r}; expected one of "
+                f"{GAIN_FLOOR_MODES}"
+            )
         self.organ = organ
+        #: ``"on"`` = the registered round-12a floor; ``"ablate"`` =
+        #: DIAGNOSTIC-ONLY pre-floor gate (never the registered path).
+        self.gain_floor = str(gain_floor)
+        #: Every survivor tick on which ``MDL_FLOOR`` refused admission
+        #: (whether or not the survivor was also unqualified).  Entries are
+        #: ``{tick, candidate_id, dbar, gain_bits, cost_bits, reason,
+        #: admitted, qualified}``; a reading of the run, never a charge.
+        self.floor_refusals: list[dict[str, Any]] = []
+        #: The subset of ``floor_refusals`` where ``survivor.qualified`` was
+        #: true -- qualified-but-refused cases (prereg §3.5 classes).
+        self.qualified_floor_refusals: list[dict[str, Any]] = []
         account = coverage_ledger()
         self.coverage: dict[int, str] = {
             fid: (
@@ -403,15 +476,26 @@ class PhysicsSource:
     def _gate(
         self, tick: int, board: Any, debris: Any
     ) -> BiasPrimitive:
-        """#22: derived from the **same** ``#23`` survivor store read.
+        """#22: the ``#23`` survivor read, gated by the MDL floor (prereg §3).
 
         ``board.nursery_survivor(tick)`` is called here exactly as the
-        executor's ``#23`` derivation calls it, and the survivor is
-        surfaced **without** a ``qualified`` pre-filter (contract §1.9/§3.4).
-        A qualified survivor (`ratio < 1.0` over at least ``RESIDENCE_N``
-        shadow ticks) yields a positive sediment carrying that candidate's
-        lineage; an unqualified (harmful) survivor, or no survivor at all,
-        yields the Q4 zero-confidence sentinel and no promotion.
+        executor's ``#23`` derivation calls it, and the survivor is surfaced
+        **without** a ``qualified`` pre-filter (contract §1.9/§3.4): a harmful
+        survivor must stay observable as surfaced-and-refused.
+
+        A positive sediment requires **both** conditions:
+
+        * the survivor's residence evidence qualifies (``ratio < 1.0`` over at
+          least ``RESIDENCE_N`` out-of-sample shadow ticks), and
+        * ``MDL_FLOOR.admitted(record)`` -- the pre-registered amortised gain
+          condition ``kappa*H*dbar > 32*K`` over the same out-of-sample
+          evidence (strict inequality; a zero gain is refused).
+
+        In the DIAGNOSTIC-ONLY ``gain_floor="ablate"`` mode the floor is not
+        applied: that reconstructs the pre-floor round-11 gate to measure what
+        the old gate admitted.  It is never the registered path.  Every floor
+        refusal is recorded on the source (``floor_refusals`` and its
+        qualified subset); a refusal is a reading, never a channel charge.
         """
         survivor = board.nursery_survivor(int(tick))
         self.last_survivor = survivor
@@ -419,13 +503,45 @@ class PhysicsSource:
             body = noop_bias()
             self.last_gate = body
             return body
-        ratio = float(survivor.ratio)
-        if survivor.qualified:
+        candidate_id = str(survivor.candidate_id)
+        record = self.organ.candidate_record(candidate_id)
+        if record is None:
+            raise AssertionError(
+                f"#23 surfaced {candidate_id!r} but the organ does not hold "
+                "its record: the store and organ evidence sets have diverged"
+            )
+        qualified = bool(survivor.qualified)
+        organ_qualified = bool(
+            record.qualified(self.organ.thresholds.residence_n)
+        )
+        if organ_qualified != qualified:
+            raise AssertionError(
+                f"store/organ qualified disagreement for {candidate_id!r}: "
+                f"{qualified} != {organ_qualified}"
+            )
+        admitted = True
+        if self.gain_floor == "on":
+            verdict = MDL_FLOOR.verdict(record)
+            admitted = bool(verdict["admitted"])
+            if not admitted:
+                entry = {
+                    "tick": int(tick),
+                    "candidate_id": candidate_id,
+                    "dbar": float(verdict["dbar"]),
+                    "gain_bits": float(verdict["gain_bits"]),
+                    "cost_bits": float(verdict["cost_bits"]),
+                    "reason": str(verdict["reason"]),
+                    "admitted": False,
+                    "qualified": qualified,
+                }
+                self.floor_refusals.append(entry)
+                if qualified:
+                    self.qualified_floor_refusals.append(dict(entry))
+        if qualified and admitted:
+            ratio = float(survivor.ratio)
             confidence = float(min(max(1.0 - ratio, 0.0), 1.0))
             body = BiasPrimitive(
-                "ratchet-gate-passed",
-                confidence,
-                str(survivor.candidate_id),
+                "ratchet-gate-passed", confidence, candidate_id
             )
         else:
             body = noop_bias()
@@ -607,6 +723,10 @@ class RunTick:
     candidate_qualified: bool
     shadow_ratio: float | None
     shadow_n: int
+    #: This tick's shadow sums over ``scores.values()`` (``None`` when the
+    #: tick has no shadow sample): the ratio-of-means inputs of prereg §2.
+    shadow_adapted_sum: float | None
+    shadow_base_sum: float | None
     # --- the #23 survivor read and the #22 gate ---------------------------
     survivor_id: str | None
     survivor_ratio: float | None
@@ -656,9 +776,21 @@ class PhysicsRun:
     7. prune both indices and record the row.
 
     The loop trigger is the round-9a ``_should_propose`` shape without the
-    delay: no fit attempted yet, no active live overlay, enough history for
-    the registered fit window, and this tick's surprise above the measured
-    spike threshold.  Birth is immediate at the trigger tick.
+    delay: no fit attempted yet, no active live overlay, at least ``N_MIN``
+    real transitions of evidence (prereg §4), and this tick's surprise above
+    the measured spike threshold.  Birth is immediate at the trigger tick,
+    and the fit consumes ``min(fit_window, tick)`` real transitions so the
+    capacity bound uses the evidence actually available.
+
+    Round 12a control surface (all explicitly labelled in the summary):
+
+    * ``gain_floor="on"`` (default) gates ``#22`` on
+      ``MDL_FLOOR.admitted(record)``; ``"ablate"`` is a DIAGNOSTIC-ONLY
+      reconstruction of the pre-floor round-11 gate.
+    * ``trigger="registered"`` (default) is prereg §4; ``"round11"`` is the
+      HISTORICAL DIAGNOSTIC reproducing the Round-11 falsifier trace.
+    * ``patch_mode`` in ``{"fitted", "zero", "random", "shuffled"}`` selects
+      the candidate substance for the prereg §6 null controls.
     """
 
     def __init__(
@@ -668,7 +800,38 @@ class PhysicsRun:
         seed: int = REGISTERED_SEED,
         fit_window: int = DEFAULT_FIT_WINDOW,
         birth_on_spike: bool = True,
+        gain_floor: str = DEFAULT_GAIN_FLOOR,
+        trigger: str = DEFAULT_TRIGGER,
+        patch_mode: str = "fitted",
+        rng_seed: int | None = None,
     ) -> None:
+        if gain_floor not in GAIN_FLOOR_MODES:
+            raise ValueError(
+                f"unknown gain_floor {gain_floor!r}; expected one of "
+                f"{GAIN_FLOOR_MODES}"
+            )
+        if trigger not in TRIGGERS:
+            raise ValueError(
+                f"unknown trigger {trigger!r}; expected one of {TRIGGERS}"
+            )
+        if patch_mode not in PATCH_MODES:
+            raise ValueError(
+                f"unknown patch_mode {patch_mode!r}; expected one of "
+                f"{PATCH_MODES}"
+            )
+        #: ``"on"`` = the registered round-12a MDL floor; ``"ablate"`` =
+        #: DIAGNOSTIC-ONLY pre-floor gate (prereg §3/§6).  The default is
+        #: asserted at the source level by the tests.
+        self.gain_floor = str(gain_floor)
+        #: ``"registered"`` = prereg §4 trigger; ``"round11"`` = the labelled
+        #: historical diagnostic used only to reproduce the Round-11
+        #: falsifier trace (birth t19, K=5,056, promotion t27).
+        self.trigger = str(trigger)
+        #: Candidate substance for the null controls (prereg §6):
+        #: ``"fitted"`` is the registered path; the others are experimental
+        #: controls and never steer the live model.
+        self.patch_mode = str(patch_mode)
+        self.rng_seed = None if rng_seed is None else int(rng_seed)
         self.organ = organ if organ is not None else PhysicsOrgan(
             store_frames=True, fit_streams={0}
         )
@@ -681,7 +844,7 @@ class PhysicsRun:
         # previous experiment, and reusing them would make the run
         # unrepeatable.
         self.organ.reset_p6_state()
-        self.source = PhysicsSource(self.organ)
+        self.source = PhysicsSource(self.organ, gain_floor=self.gain_floor)
         self.dry = DryRun(source=self.source, seed_board=False)
         self.seed = int(seed)
         self.rng = np.random.default_rng(self.seed)
@@ -693,6 +856,14 @@ class PhysicsRun:
         self.births: list[tuple[str, int]] = []
         self.started = False
         self._fit_attempted = False
+        #: The born :class:`CandidateRecord` (at most one per run), kept by
+        #: reference so its evidence and birth sample stay readable after a
+        #: promotion/eviction removes it from the nursery.
+        self._tracked_candidate: Any = None
+        #: The candidate-fits ``FitRecord`` (captured at birth).  It must not
+        #: be read as ``fit_history[-1]`` at summary time: a later live-overlay
+        #: adoption appends its own fit record, and that is not the candidate.
+        self._birth_fit: Any = None
         self._flip_at: int | None = None
         self._flip_back_at: int | None = None
 
@@ -711,7 +882,7 @@ class PhysicsRun:
         # cooldown and fit history, then rebuild the source/executor so the
         # stores start clean.
         self.organ.reset_p6_state()
-        self.source = PhysicsSource(self.organ)
+        self.source = PhysicsSource(self.organ, gain_floor=self.gain_floor)
         self.dry = DryRun(source=self.source, seed_board=False)
         observation = self.organ.reset(seed=self.seed)
         self.ticks.clear()
@@ -720,18 +891,37 @@ class PhysicsRun:
         self.d4_trace.append(tuple(self.board.d4))
         self.started = True
         self._fit_attempted = False
+        self._tracked_candidate = None
+        self._birth_fit = None
         return observation
 
     def flip_gravity(self) -> int | dict[int, int]:
         return self.organ.flip_gravity(stream=0)
 
     def _should_birth(self, observation: Observation) -> bool:
-        """The loop trigger: the ``_should_propose`` shape, birth immediate."""
+        """The loop trigger: the ``_should_propose`` shape, birth immediate.
+
+        Evidence sufficiency (prereg §4): the registered trigger replaces the
+        old absolute guard ``tick >= fit_window`` with ``tick >= N_MIN``.  The
+        structural window is *not* consulted by the registered trigger -- it
+        is capped to the actual evidence at the birth call
+        (``min(fit_window, tick)``).
+
+        ``trigger="round11"`` restores the old absolute guard.  It is a
+        **HISTORICAL DIAGNOSTIC** only, used to reproduce the Round-11
+        falsifier trace (birth t19, K=5,056); the default is ``"registered"``
+        and the tests assert that the historical mode is not reachable by
+        default.
+        """
         if not self.birth_on_spike or self._fit_attempted:
             return False
         if self.organ.overlay_table.active():
             return False
-        if int(observation.tick) < self.fit_window:
+        tick = int(observation.tick)
+        if self.trigger == "round11":
+            if tick < self.fit_window:
+                return False
+        elif tick < N_MIN:
             return False
         surprise = float(observation.surprise)
         return bool(
@@ -775,19 +965,32 @@ class PhysicsRun:
         born = None
         if self._should_birth(observation):
             self._fit_attempted = True
+            # The structural window is capped to the actual evidence: N is the
+            # number of real transitions the fit consumes (prereg §4), so the
+            # capacity bound (K <= gamma*N*D) is the one the evidence supports.
+            fits_before = len(self.organ.fit_history)
             born = self.organ.birth_candidate(
-                int(observation.tick), fit_window=self.fit_window, stream=0
+                int(observation.tick),
+                fit_window=min(self.fit_window, int(observation.tick)),
+                stream=0,
+                patch_mode=self.patch_mode,
+                rng_seed=self.rng_seed,
             )
+            if len(self.organ.fit_history) > fits_before:
+                # The candidate's own fit record; kept separately because a
+                # live-overlay adoption later appends its own record.
+                self._birth_fit = self.organ.fit_history[fits_before]
             if born is not None:
                 self.births.append((str(born.candidate_id), int(observation.tick)))
+                self._tracked_candidate = born
         # 4. shadow-score every resident candidate on this tick's transition.
         #    Out-of-sample only: a candidate born this tick was fitted on the
-        #    last ``fit_window`` transitions *ending at this tick*, so its
-        #    birth-tick transition is in-sample and cannot be evidence (the
-        #    store cannot even carry it: its annotation runs before #18
-        #    commits).  Excluding it keeps the organ's evidence set identical
-        #    to the store's, so the ADAPTATION gate reads the same samples the
-        #    #22 gate does.
+        #    last ``min(fit_window, birth_tick)`` transitions ending at this
+        #    tick, so its birth-tick transition is in-sample and cannot be
+        #    evidence (the store cannot even carry it: its annotation runs
+        #    before #18 commits).  Excluding it keeps the organ's evidence set
+        #    identical to the store's, so the ADAPTATION gate reads the same
+        #    samples the #22 gate does.
         scores = self.organ.shadow_scores(
             int(observation.tick),
             stream=0,
@@ -795,13 +998,21 @@ class PhysicsRun:
                 None if born is None else int(born.born_tick)
             ),
         )
+        adapted_sum: float | None
+        base_sum: float | None
+        shadow_ratio: float | None
         if scores:
-            adapted = float(np.mean([pair[0] for pair in scores.values()]))
-            base = float(np.mean([pair[1] for pair in scores.values()]))
-            shadow_ratio: float | None = (
-                adapted / base if base > 0.0 else float("inf")
+            # Sums, not means: the gate is a ratio of error mass (prereg §2),
+            # so ``sum adapted / sum base`` is the primary statistic and the
+            # per-tick row keeps the raw sums it was computed from.
+            adapted_sum = float(sum(pair[0] for pair in scores.values()))
+            base_sum = float(sum(pair[1] for pair in scores.values()))
+            shadow_ratio = (
+                adapted_sum / base_sum if base_sum > 0.0 else float("inf")
             )
         else:
+            adapted_sum = None
+            base_sum = None
             shadow_ratio = None
         # The residence curve is captured *before* the executor tick: a
         # promotion inside it removes the candidate, and the curve must
@@ -882,6 +1093,8 @@ class PhysicsRun:
             candidate_qualified=residue[5],
             shadow_ratio=shadow_ratio,
             shadow_n=len(scores),
+            shadow_adapted_sum=adapted_sum,
+            shadow_base_sum=base_sum,
             survivor_id=(
                 None if survivor is None else str(survivor.candidate_id)
             ),
@@ -954,29 +1167,151 @@ class PhysicsRun:
         return tuple(rows)
 
     # ---------------------------------------------------------------- gates
+    def _birth_sample(self) -> tuple[int, float, float] | None:
+        """The tracked candidate's in-sample birth sample (prereg §1).
+
+        Report-only: the organ computes it on the shadow copy at birth
+        (``CandidateRecord.in_sample``), it never enters ``evidence``, and
+        neither ``#23`` nor ``#22`` reads it.  ``None`` when no candidate was
+        born or the organ does not record one (the field arrives with the
+        round-12a organ change; the runner does not fabricate it).
+        """
+        record = self._tracked_candidate
+        if record is None:
+            return None
+        sample = getattr(record, "in_sample", None)
+        if sample is None:
+            return None
+        tick, adapted, base = sample
+        return int(tick), float(adapted), float(base)
+
+    def _residence_sums(self, record: Any) -> tuple[float, float, int]:
+        """``(adapted_sum, base_sum, n)`` over the candidate's evidence.
+
+        Computed from ``evidence`` (the single source of truth) and
+        cross-checked against the organ's ``residence_sums`` when the organ
+        exposes it: a divergence is a wiring defect, never a silent number.
+        """
+        evidence = tuple(getattr(record, "evidence", ()) or ())
+        adapted_sum = float(sum(float(sample[1]) for sample in evidence))
+        base_sum = float(sum(float(sample[2]) for sample in evidence))
+        sums = getattr(record, "residence_sums", None)
+        if callable(sums):  # pragma: no cover - field or accessor both accepted
+            sums = sums()
+        if sums is not None and not (
+            np.isclose(float(sums[0]), adapted_sum)
+            and np.isclose(float(sums[1]), base_sum)
+        ):
+            raise AssertionError(
+                "organ residence_sums disagree with the candidate evidence: "
+                f"{sums} != ({adapted_sum}, {base_sum})"
+            )
+        return adapted_sum, base_sum, len(evidence)
+
     def adaptation(self) -> dict[str, Any]:
-        """ADAPTATION (pre-registered §5): flipped-phase shadow ratio."""
+        """ADAPTATION (prereg §1/§2): ratio-of-means primary, both numbers.
+
+        The declared tick sets are computed explicitly from the rows, never
+        inferred from frame numbers, and emitted in the summary:
+
+        * ``adaptation`` -- ticks with ``phase == "flipped"`` **and**
+          ``shadow_adapted_sum is not None`` (the primary set; the birth tick
+          cannot appear here because it is never shadow-scored);
+        * ``with_in_sample`` -- the primary set plus the tracked candidate's
+          birth tick when that tick is in the flipped phase (otherwise the
+          sets coincide and ``reason`` says so);
+        * ``residence`` -- every tick carrying an out-of-sample evidence
+          sample for the tracked candidate (the residence-evidence curve).
+
+        ``primary`` is the gate: ``sum_t adapted(t) / sum_t base(t)`` (the
+        error-mass ratio, prereg §2).  ``secondary_mean_of_ratios`` is the
+        pre-registered diagnostic ``mean_t(adapted/base)``, always reported
+        and never the gate.  ``value`` aliases ``primary`` for compatibility
+        with the earlier round's summary shape.
+        """
         rows = [
             row
             for row in self.ticks
-            if row.phase == "flipped" and row.shadow_ratio is not None
+            if row.phase == "flipped" and row.shadow_adapted_sum is not None
         ]
+        adaptation_ticks = [int(row.tick) for row in rows]
         n = len(rows)
+        adapted_sum = float(sum(float(row.shadow_adapted_sum) for row in rows))
+        base_sum = float(sum(float(row.shadow_base_sum) for row in rows))
         if n == 0:
-            return {
-                "value": float("nan"),
-                "n": 0,
-                "threshold": ADAPTATION_GATE,
-                "passed": False,
-                "reason": "no shadow-scored flipped-phase rows",
-            }
-        value = float(np.mean([row.shadow_ratio for row in rows]))
+            primary = float("nan")
+            secondary = float("nan")
+        else:
+            primary = (
+                adapted_sum / base_sum if base_sum > 0.0 else float("inf")
+            )
+            secondary = float(
+                np.mean([float(row.shadow_ratio) for row in rows])
+            )
+        # --- the with-in-sample sample (report-only, prereg §1) -----------
+        birth_sample = self._birth_sample()
+        birth_tick = None if birth_sample is None else int(birth_sample[0])
+        birth_phase = None
+        if birth_tick is not None:
+            for row in self.ticks:
+                if int(row.frame_tick) == birth_tick:
+                    birth_phase = row.phase
+                    break
+        if birth_sample is not None and birth_phase == "flipped":
+            with_adapted = adapted_sum + float(birth_sample[1])
+            with_base = base_sum + float(birth_sample[2])
+            with_in_sample = (
+                with_adapted / with_base if with_base > 0.0 else float("inf")
+            )
+            with_ticks = sorted(adaptation_ticks + [int(birth_tick)])
+            n_with_in_sample = n + 1
+            with_note = "adds the birth-tick sample"
+        else:
+            with_in_sample = primary
+            with_ticks = list(adaptation_ticks)
+            n_with_in_sample = n
+            with_note = (
+                "coincides with adaptation (no birth sample, or the birth "
+                "tick is not in the flipped phase)"
+            )
+        # --- the residence set and its ratio-of-means ---------------------
+        record = self._tracked_candidate
+        if record is None:
+            residence_ticks: list[int] = []
+            residence_ratio = float("nan")
+        else:
+            residence_ticks = [
+                int(sample[0])
+                for sample in tuple(getattr(record, "evidence", ()) or ())
+            ]
+            r_adapted, r_base, _ = self._residence_sums(record)
+            residence_ratio = (
+                r_adapted / r_base if r_base > 0.0 else float("inf")
+            )
+        passed = bool(
+            n > 0 and np.isfinite(primary) and primary < ADAPTATION_GATE
+        )
         return {
-            "value": value,
+            "value": primary,
+            "primary": primary,
             "n": n,
+            "secondary_mean_of_ratios": secondary,
+            "with_in_sample": with_in_sample,
+            "n_with_in_sample": n_with_in_sample,
+            "residence_ratio_of_means": residence_ratio,
+            "n_residence": len(residence_ticks),
+            "tick_sets": {
+                "adaptation": adaptation_ticks,
+                "with_in_sample": with_ticks,
+                "residence": residence_ticks,
+            },
             "threshold": ADAPTATION_GATE,
-            "passed": bool(value < ADAPTATION_GATE),
-            "reason": "measured",
+            "passed": passed,
+            "reason": (
+                f"measured; with-in-sample set {with_note}"
+                if n > 0
+                else "no shadow-scored flipped-phase rows"
+            ),
         }
 
     def admission(self) -> dict[str, Any]:
@@ -1022,6 +1357,8 @@ class PhysicsRun:
         warmup: int = WARMUP,
         post_flip: int = POST_FLIP,
         recovery: int = RECOVERY,
+        flip_at: int | None = FLIP_AT,
+        flip_back_at: int | None = FLIP_BACK_AT,
     ) -> AcceptanceResult:
         """The registered scenario: normal -> flip -> flip back -> recover.
 
@@ -1029,17 +1366,35 @@ class PhysicsRun:
         ``post_flip=20`` frames, flipped back at frame 28, ``recovery=8``
         frames -- 36 executor ticks.  The gates are computed from the rows
         (``adaptation``/``admission``) and the summary cross-checks them.
+
+        ``flip_at=None`` disables the flip entirely (the prereg §6
+        ``no_flip`` null); ``flip_back_at`` is then ignored.  Any other flip
+        schedule is a diagnostic variant and is reported in the summary, not
+        re-registered.
         """
         self.reset(seed=seed)
         before = tuple(self.board.d4)
         total = int(warmup) + int(post_flip) + int(recovery)
+        effective_flip = None if flip_at is None else int(flip_at)
+        effective_flip_back = (
+            None
+            if effective_flip is None or flip_back_at is None
+            else int(flip_back_at)
+        )
         rows = self._drive(
             total,
-            flip_at=int(warmup),
-            flip_back_at=int(warmup) + int(post_flip),
+            flip_at=effective_flip,
+            flip_back_at=effective_flip_back,
         )
         after = tuple(self.board.d4)
-        return self._result(rows, before=before, after=after, seed=seed)
+        return self._result(
+            rows,
+            before=before,
+            after=after,
+            seed=seed,
+            flip_at=effective_flip,
+            flip_back_at=effective_flip_back,
+        )
 
     def _result(
         self,
@@ -1048,6 +1403,8 @@ class PhysicsRun:
         before: tuple[BiasPrimitive, ...],
         after: tuple[BiasPrimitive, ...],
         seed: int,
+        flip_at: int | None = FLIP_AT,
+        flip_back_at: int | None = FLIP_BACK_AT,
     ) -> AcceptanceResult:
         adaptation = self.adaptation()
         admission = self.admission()
@@ -1091,17 +1448,50 @@ class PhysicsRun:
             "scenario": {
                 "seed": int(seed),
                 "warmup": WARMUP,
-                "flip_at": FLIP_AT,
+                "flip_at": flip_at,
                 "post_flip": POST_FLIP,
-                "flip_back_at": FLIP_BACK_AT,
+                "flip_back_at": flip_back_at,
                 "recovery": RECOVERY,
                 "ticks": len(rows),
                 "fit_window": self.fit_window,
+                # Evidence-sufficiency trigger (prereg §4); 16 remains the
+                # structural cap, never the registered trigger guard.
+                "n_min": N_MIN,
+                # Control surface: every run says which mode produced it.
+                "trigger": self.trigger,
+                "gain_floor": self.gain_floor,
+                "patch_mode": self.patch_mode,
+                "rng_seed": self.rng_seed,
             },
             "gates": {
                 "adaptation": adaptation,
                 "admission": admission,
             },
+            # --- the MDL gain floor (prereg §3) -----------------------------
+            "floor": {
+                "mode": self.gain_floor,
+                # Every survivor tick on which the floor refused admission.
+                "refusals": tuple(self.source.floor_refusals),
+                # The qualified-but-refused subset (the §3.5 refusal classes).
+                "qualified_refusals": tuple(
+                    self.source.qualified_floor_refusals
+                ),
+            },
+            # The retroactive falsifier reading: the tracked candidate's floor
+            # verdict, computed from its own out-of-sample evidence.
+            "candidate_verdict": (
+                None
+                if self._tracked_candidate is None
+                else MDL_FLOOR.verdict(self._tracked_candidate)
+            ),
+            # --- the declared ADAPTATION tick sets, printed explicitly ------
+            # (prereg §2: never inferred; both numbers and both sets always)
+            "adaptation_set": adaptation["tick_sets"]["adaptation"],
+            "with_in_sample_set": adaptation["tick_sets"]["with_in_sample"],
+            "residence_set": adaptation["tick_sets"]["residence"],
+            "residence_ratio_of_means": adaptation[
+                "residence_ratio_of_means"
+            ],
             # --- measured state, not gates (§5(ii)-(iii)) -----------------
             "control_expectation": (
                 "pre-registered: zero promotions (seed 0)"
@@ -1131,21 +1521,21 @@ class PhysicsRun:
                 for row in harmful_survivors
             ),
             "candidate_fit": {
-                "attempted": bool(self.organ.fit_history),
+                # The candidate's own birth fit: ``fit_history[-1]`` is not
+                # the candidate after a live-overlay adoption appends a fit.
+                "attempted": self._birth_fit is not None,
                 "record": (
                     None
-                    if not self.organ.fit_history
+                    if self._birth_fit is None
                     else {
-                        "rank": self.organ.fit_history[-1].rank,
-                        "param_count": self.organ.fit_history[-1].param_count,
-                        "nbytes": self.organ.fit_history[-1].nbytes,
-                        "loss_before": self.organ.fit_history[-1].loss_before,
-                        "loss_after": self.organ.fit_history[-1].loss_after,
-                        "budget_n": self.organ.fit_history[-1].budget_n,
-                        "budget_capacity": (
-                            self.organ.fit_history[-1].budget_capacity
-                        ),
-                        "reason": self.organ.fit_history[-1].reason,
+                        "rank": self._birth_fit.rank,
+                        "param_count": self._birth_fit.param_count,
+                        "nbytes": self._birth_fit.nbytes,
+                        "loss_before": self._birth_fit.loss_before,
+                        "loss_after": self._birth_fit.loss_after,
+                        "budget_n": self._birth_fit.budget_n,
+                        "budget_capacity": self._birth_fit.budget_capacity,
+                        "reason": self._birth_fit.reason,
                     }
                 ),
                 "refusals": tuple(self.organ.refusals),

@@ -14,6 +14,7 @@ from amateur.dryrun import (
 )
 from amateur.ledger import FLOW_LEDGER
 from amateur.payloads import (
+    COHORT_KINDS,
     CostErrorBody,
     BiasPrimitive,
     DissipatedEntropyBody,
@@ -284,6 +285,59 @@ class TestRound11Executor(unittest.TestCase):
             balance["deposits"],
             balance["resident"] + balance["drained"] + balance["evicted"],
         )
+        # Both named accounts (prereg §7) close on the real run.  The flat
+        # keys above are the Round-11 surface `run.py` stores every tick and
+        # are unchanged; the two accounts are reported beside them.
+        conservation = balance["conservation_account"]
+        issuance = balance["issuance_account"]
+        self.assertTrue(conservation["holds"], msg=conservation)
+        self.assertTrue(issuance["holds"], msg=issuance)
+        self.assertEqual(
+            conservation["identity"],
+            "deposits = resident + drained + evicted",
+        )
+        self.assertEqual(
+            issuance["formula"],
+            "deposits = promoted + resident_unpromoted "
+            "+ drained_unpromoted + evicted",
+        )
+        # Measured 1000-tick profile, pinned: 32 cohort capacity, 4 cohorts
+        # per #19 deposit, TTL drainage, FIFO capacity eviction.
+        self.assertEqual(
+            (conservation["deposits"], conservation["resident"],
+             conservation["drained"], conservation["evicted"],
+             conservation["ceiling_evicted"]),
+            (4000, 32, 999, 2969, 0),
+        )
+        self.assertEqual(
+            (issuance["promoted"], issuance["resident_unpromoted"],
+             issuance["drained_unpromoted"], issuance["evicted"],
+             issuance["evicted_promoted"], issuance["issued"]),
+            (0, 32, 999, 2969, 0, 4000),
+        )
+        self.assertIs(balance["issuance"], issuance)
+
+    def test_mass_balance_flat_keys_are_the_round11_surface(self) -> None:
+        """`run.py` stores this dict per tick: no existing key may move."""
+        run = DryRun()
+        run.run(3)
+        balance = run.debris.mass_balance()
+        for key in (
+            "deposits",
+            "resident",
+            "drained",
+            "evicted",
+            "ceiling_evicted",
+            "promoted",
+            "reads_by_kind",
+            "issuance",
+        ):
+            self.assertIn(key, balance, msg=key)
+        self.assertEqual(set(balance["reads_by_kind"]), set(COHORT_KINDS))
+        # The two named accounts are additive, not a replacement.
+        self.assertIsInstance(balance["conservation_account"], dict)
+        self.assertIsInstance(balance["issuance_account"], dict)
+        self.assertIs(balance["issuance"], balance["issuance_account"])
 
 
 if __name__ == "__main__":

@@ -50,15 +50,24 @@ from amateur.physics.data import generate_rollouts
 from amateur.physics.env import PhysicsEnv, WorldConfig
 from amateur.physics.micro_lewm import MicroLeWM
 from amateur.physics.organ import (
+    AMORTISATION_HORIZON,
     COHORT_KINDS,
     DEFAULT_FIT_WINDOW,
     DEFAULT_LATENT_DIM,
+    DEFAULT_NULL_SEED,
+    KAPPA_BITS_PER_ERROR,
+    MDL_FLOOR,
+    MOTIF_MIN_COUNT,
+    MOTIF_MIN_PERSISTENCE,
     NURSERY_CAPACITY,
+    PATCH_MODES,
     RESIDENCE_N,
     CandidateRecord,
     CandidateTable,
     CohortRecord,
     CollapseMandate,
+    DigestThresholds,
+    GainFloor,
     Observation,
     OverlayTable,
     Phase3Stats,
@@ -68,6 +77,7 @@ from amateur.physics.organ import (
     StructuralMotif,
     derive_thresholds,
     frames_tensor_from,
+    null_false_declaration_probability,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1132,8 +1142,9 @@ class TestNurseryScenario(unittest.TestCase):
         counts = self.trace.cohort_counts
         for kind in COHORT_KINDS:
             self.assertGreater(counts[kind], 0, f"no {kind} cohort in the run")
-        # The tags are not decorative: a motif cohort is rare (the persistence
-        # gate is 10 consecutive supported ticks) and residuals dominate.
+        # The tags are not decorative: under the derived pair (2, 2) a motif
+        # cohort is still the minority class on this 16-stream probe and
+        # residuals dominate.  Round 12a measured motif 39 / residual 49.
         self.assertGreater(counts["residual"], counts["motif"])
         self.assertGreater(counts["trail"], 0)
 
@@ -1170,19 +1181,35 @@ class TestNurseryScenario(unittest.TestCase):
         self.assertGreater(min(ratios), 0.0)
 
     def test_live_overlay_lifecycle_from_the_motif_cohort(self) -> None:
+        """The ``#21`` -> ``#24`` lifecycle under the **derived** pair (2, 2).
+
+        Round 12a replaced the bank constants (4, 10) with the derived pair,
+        so the live path now fires on this 16-stream probe instead of never
+        (measured: motif cohorts 0 -> 39).  The measured lifecycle is: births
+        at 11 (``ovr-02``), 21 (``ovr-03``) and 36 (``ovr-04``); ``ovr-02``
+        goes stale at 17 and is evicted at 20; ``ovr-03`` goes stale at 31 and
+        is evicted at 34; ``ovr-04`` is adopted on the run's last tick and is
+        therefore still resident when the run ends.  The pinned claims stay
+        structural -- adopted during the flip, before the flip back; stale
+        after birth; evicted after stale; at least one patch goes stale in the
+        **recovered** phase -- plus the exact measured ids/tokens so a silent
+        behaviour change cannot pass.
+        """
         lifecycle = self.trace.lifecycle()
         self.assertTrue(self.trace.overlay_births)
-        # Measured on this trace: the motif cohort appears at tick 24 (the
-        # overlay persists as a body for ~10 supported ticks).  The pinned
-        # claim is structural -- adopted during the flip, before the flip
-        # back -- not the exact tick.
-        self.assertGreaterEqual(lifecycle["overlay_birth"], 9)
-        self.assertLess(lifecycle["overlay_birth"], self.trace.flip_back_at)
+        self.assertEqual(
+            [record.overlay_id for record in self.trace.overlay_births],
+            ["ovr-02", "ovr-03", "ovr-04"],
+        )
+        # Structural: adopted during the flip, before the flip back.
         birth = self.trace.overlay_births[0]
+        self.assertGreaterEqual(birth.birth_tick, self.trace.flip_at + 1)
+        self.assertLess(birth.birth_tick, self.trace.flip_back_at)
         self.assertEqual(birth.token(), (1, "ovr-02", "active"))
-        self.assertEqual(birth.motif_id, "motif-debris-001-s6-0024")
+        self.assertEqual(birth.motif_id, "motif-debris-001-s14-0011")
         self.assertTrue(self.trace.overlay_revalidations)
         self.assertEqual(self.trace.overlay_revalidations[0].epoch, 2)
+        self.assertEqual(self.trace.overlay_revalidations[0].overlay_id, "ovr-02")
         stale = lifecycle["overlay_stale"]
         eviction = lifecycle["overlay_evict"]
         self.assertIsNotNone(stale)
@@ -1190,21 +1217,37 @@ class TestNurseryScenario(unittest.TestCase):
         assert stale is not None and eviction is not None
         self.assertGreater(stale, birth.birth_tick)
         self.assertGreater(eviction, stale)
-        # The patch went stale in the recovered phase, not during the flip: the
-        # staleness rule reads the predictor's own adapted-vs-base comparison.
-        self.assertGreaterEqual(stale, self.trace.flip_back_at)
+        # Two patches went stale and were evicted; the stale decision for a
+        # tick is finalised when the next tick's digest arrives.
         self.assertEqual(
-            [item.token() for item in self.trace.overlay_evictions],
-            [(8, "ovr-02", "stale")],
+            [record.token() for record in self.trace.overlay_stales],
+            [(6, "ovr-02", "stale"), (11, "ovr-03", "stale")],
+        )
+        self.assertEqual(
+            [record.token() for record in self.trace.overlay_evictions],
+            [(6, "ovr-02", "stale"), (11, "ovr-03", "stale")],
+        )
+        # The staleness rule reads the predictor's own adapted-vs-base
+        # comparison, and at least one patch does go stale in the *recovered*
+        # phase, not during the flip.
+        self.assertTrue(
+            any(
+                record.stale_tick is not None
+                and record.stale_tick >= self.trace.flip_back_at
+                for record in self.trace.overlay_stales
+            )
         )
 
     def test_live_overlay_helps_in_its_regime_and_hurts_out_of_it(self) -> None:
         """Measured live state (contract §5(iii)): the patch is regime-bound.
 
-        While the flipped dynamics it was fitted for persist, the live overlay
-        beats the base predictor; after the flip back it hurts, which is
-        exactly what the staleness rule must catch (and it does: stale at 31,
-        evicted at 34).  Reported as measured state, never as a gate.
+        Under the derived pair two patches steer on this probe: ``ovr-02``
+        over ticks 12-18 (inside the flip) and ``ovr-03`` over ticks 22-32
+        (crossing the flip back at 28).  ``ovr-03`` is where the regime-bound
+        fact is measured: it beats the base predictor while the flipped
+        dynamics persist and hurts after the flip back, which is exactly what
+        the staleness rule must catch (and it does: stale at 31, evicted at
+        34).  Reported as measured state, never as a gate.
         """
         flipped = self.trace.live_ratio(phase="flipped")
         recovered = self.trace.live_ratio(phase="recovered")
@@ -1213,16 +1256,28 @@ class TestNurseryScenario(unittest.TestCase):
         self.assertLess(flipped, 1.0)
         self.assertGreater(recovered, 1.0)
         self.assertTrue(self.trace.live_rows)
-        # The steered ticks lie between the overlay birth and its staleness.
-        # The stale *decision* for tick t is finalised when t+1's digest
-        # arrives (the round-9a lifecycle cadence, unchanged), so the patch
-        # steers at most one tick past the recorded stale tick.
-        birth = self.trace.adoption_tick
-        stale = self.trace.stale_tick
-        assert birth is not None and stale is not None
+        # Per-overlay attribution (stronger than the single-patch window it
+        # replaces now that two patches steer): every steered tick lies
+        # strictly after the birth of the patch that steered it and no later
+        # than that patch's stale decision + 1.  The stale *decision* for tick
+        # t is finalised when t+1's digest arrives (the round-9a lifecycle
+        # cadence, unchanged), so a patch steers at most one tick past its
+        # recorded stale tick.
+        windows = [
+            (
+                record.birth_tick,
+                None if record.stale_tick is None else record.stale_tick + 1,
+            )
+            for record in self.trace.overlay_births
+        ]
         for tick, _, _ in self.trace.live_rows:
-            self.assertGreater(tick, birth)
-            self.assertLessEqual(tick, stale + 1)
+            self.assertTrue(
+                any(
+                    low < tick and (high is None or tick <= high)
+                    for low, high in windows
+                ),
+                f"steered tick {tick} is outside every adopted patch's window",
+            )
 
     def test_zero_d4_writes_and_encoder_bit_identical(self) -> None:
         self.assertEqual(self.trace.d4_writes, 0)
@@ -1232,11 +1287,21 @@ class TestNurseryScenario(unittest.TestCase):
         self.assertTrue(self.organ.encoder_bit_identical())
 
     def test_end_state_is_clean(self) -> None:
-        # The promoted candidate left the nursery; the live overlay was
-        # evicted.  Nothing is retained on the physics side.
+        """The candidate side is clean; one patch adopted on the last tick is resident.
+
+        Round 12a measurement: under the derived pair (2, 2) the live path
+        fires on the run's final tick (36) and adopts ``ovr-04`` there, so that
+        patch is still resident and active when the run ends -- there is no
+        subsequent tick on which to stale or evict it.  That is the measured
+        end state of a probe whose last tick produced a motif, not a retained
+        leftover: everything the run created earlier is gone.
+        """
         self.assertEqual(self.organ.candidate_ids(), ())
-        self.assertEqual(self.organ.overlay_table.all_ids(), frozenset())
-        self.assertIsNone(self.organ._active_overlay_id)
+        self.assertEqual(self.organ.overlay_table.all_ids(), frozenset({"ovr-04"}))
+        self.assertEqual(self.organ._active_overlay_id, "ovr-04")
+        final = self.trace.overlay_births[-1]
+        self.assertEqual(final.overlay_id, "ovr-04")
+        self.assertEqual(final.birth_tick, self.trace.tick_rows[-1].tick)
 
 
 # ---------------------------------------------------------------------------
@@ -1324,6 +1389,511 @@ class TestOverlayFitHeldOut(unittest.TestCase):
         self.assertGreater(ratio, 0.0)
         per_transition = adapted[:, post].mean(axis=0) / base[:, post].mean(axis=0)
         self.assertLess(float(per_transition.max()), 1.05)
+
+
+
+# ---------------------------------------------------------------------------
+# Round 12a §3: the amortised MDL gain floor
+# ---------------------------------------------------------------------------
+def record_with(
+    candidate_id: str = "cand-01",
+    *,
+    rank: int = 1,
+    evidence: list[tuple[int, float, float]] | None = None,
+    in_sample: tuple[int, float, float] | None = None,
+) -> CandidateRecord:
+    """A synthetic nursery record with a chosen ``K`` and evidence set."""
+    return CandidateRecord(
+        candidate_id=candidate_id,
+        overlay=dummy_overlay(candidate_id, rank=rank),
+        born_tick=0,
+        evidence=list(evidence or []),
+        in_sample=in_sample,
+    )
+
+
+class TestGainFloor(unittest.TestCase):
+    """The pre-registered admission condition ``kappa*H*dbar > 32*K`` (§3)."""
+
+    def test_the_constants_are_the_derived_ones(self) -> None:
+        # kappa = d / (2 sigma^2 ln 2), d = 64, sigma^2 = the phase-3 measured
+        # in-distribution mean surprise (the variance the model's code assumes).
+        normal_mean = 0.04938631785656374
+        self.assertAlmostEqual(DEFAULT_LATENT_DIM, 64)
+        self.assertAlmostEqual(
+            KAPPA_BITS_PER_ERROR,
+            DEFAULT_LATENT_DIM / (2.0 * normal_mean * float(np.log(2.0))),
+            places=9,
+        )
+        self.assertEqual(AMORTISATION_HORIZON, 20)  # POST_FLIP, the registered episode
+        self.assertEqual(
+            MDL_FLOOR,
+            GainFloor(KAPPA_BITS_PER_ERROR, AMORTISATION_HORIZON),
+        )
+        # One tick of residual magnitude costs d/(2 ln 2) bits at this point.
+        self.assertAlmostEqual(
+            KAPPA_BITS_PER_ERROR * normal_mean,
+            DEFAULT_LATENT_DIM / (2.0 * float(np.log(2.0))),
+            places=9,
+        )
+
+    def test_arithmetic_and_the_three_reasons(self) -> None:
+        floor = MDL_FLOOR
+        # K = 64*1 + 128*1 + 64 = 256 -> cost = 8192 bits; break-even dbar is
+        # 8192 / (kappa*20) = 0.43811... latent^2 per dimension per tick.
+        record = record_with(evidence=[(1, 1.0, 1.5)])
+        self.assertEqual(record.overlay.param_count, 256)
+        self.assertAlmostEqual(floor.dbar(record), 0.5, places=12)
+        self.assertAlmostEqual(
+            floor.gain_bits(record), KAPPA_BITS_PER_ERROR * 20 * 0.5, places=6
+        )
+        self.assertAlmostEqual(floor.cost_bits(record), 32.0 * 256, places=9)
+        verdict = floor.verdict(record)
+        self.assertEqual(
+            set(verdict),
+            {"candidate_id", "dbar", "gain_bits", "cost_bits", "admitted", "reason"},
+        )
+        self.assertEqual(verdict["candidate_id"], "cand-01")
+        self.assertTrue(verdict["admitted"])
+        self.assertEqual(verdict["reason"], "admitted")
+        # dbar is the mean of (base - adapted) over the evidence, not a ratio.
+        record = record_with(evidence=[(1, 0.0, 1.0), (2, 2.0, 1.0)])
+        self.assertAlmostEqual(floor.dbar(record), 0.0, places=12)
+
+        # harmful: a non-positive mean reduction, refused before the economics.
+        for adapted, base in ((2.0, 1.0), (1.0, 1.0)):
+            verdict = floor.verdict(record_with(evidence=[(1, adapted, base)]))
+            self.assertFalse(verdict["admitted"])
+            self.assertEqual(verdict["reason"], "harmful")
+        self.assertLess(floor.gain_bits(record_with(evidence=[(1, 2.0, 1.0)])), 0.0)
+
+        # uneconomic: 0 < gain <= cost.
+        verdict = floor.verdict(record_with(evidence=[(1, 1.0, 1.1)]))
+        self.assertFalse(verdict["admitted"])
+        self.assertEqual(verdict["reason"], "uneconomic")
+        self.assertGreater(verdict["gain_bits"], 0.0)
+        self.assertLess(verdict["gain_bits"], verdict["cost_bits"])
+
+    def test_the_inequality_is_strict(self) -> None:
+        # kappa = 1, H = 1 makes gain_bits == dbar exactly, so equality is
+        # representable and the boundary can be pinned without float noise.
+        floor = GainFloor(1.0, 1)
+        cost = 32.0 * 256
+        exactly_even = record_with(evidence=[(1, 0.0, cost)])
+        self.assertEqual(floor.gain_bits(exactly_even), floor.cost_bits(exactly_even))
+        self.assertFalse(floor.admitted(exactly_even))       # strict: even -> refused
+        self.assertEqual(floor.verdict(exactly_even)["reason"], "uneconomic")
+        just_above = record_with(evidence=[(1, 0.0, cost * (1.0 + 1e-9))])
+        self.assertTrue(floor.admitted(just_above))
+        self.assertEqual(floor.verdict(just_above)["reason"], "admitted")
+
+    def test_no_evidence_has_no_claim(self) -> None:
+        floor = MDL_FLOOR
+        record = record_with(evidence=[])
+        # The empty sum is the arithmetic identity (0.0, 0.0); the empty mean
+        # is nan.  The runner cross-checks the sums against the evidence, so
+        # they must agree even when there is nothing to sum.
+        self.assertEqual(record.residence_sums, (0.0, 0.0))
+        self.assertTrue(np.isnan(record.adapted_mean))
+        self.assertTrue(np.isnan(record.base_mean))
+        self.assertEqual(record.ratio, float("inf"))
+        self.assertTrue(np.isnan(record.with_in_sample_ratio))
+        self.assertTrue(np.isnan(floor.dbar(record)))
+        self.assertTrue(np.isnan(floor.gain_bits(record)))
+        self.assertFalse(floor.admitted(record))
+        self.assertEqual(floor.verdict(record)["reason"], "uneconomic")
+
+    def test_the_pre_registered_falsifier_refuses_the_seed7_candidate(self) -> None:
+        """§3.5: the condition must REFUSE the historical seed-7 t27 candidate.
+
+        Registered numbers (prereg §3.4): K = 5056 (rank 26), out-of-sample
+        R = 0.999225, base error scale b = 0.28597303529750207.  dbar =
+        b*(1-R) = 2.2163e-4 -> gain(20) = 4.14 bits against a description cost
+        of 161,792 bits.  If this record were admitted the condition would not
+        be a floor.
+        """
+        b = 0.28597303529750207
+        ratio = 0.999225
+        evidence = [(tick, b * ratio, b) for tick in range(1, 9)]
+        record = record_with(rank=26, evidence=evidence)
+        self.assertEqual(record.overlay.param_count, 5_056)
+        verdict = MDL_FLOOR.verdict(record)
+        self.assertAlmostEqual(verdict["dbar"], b * (1.0 - ratio), places=12)
+        self.assertAlmostEqual(verdict["dbar"], 2.2163e-4, places=8)
+        self.assertAlmostEqual(verdict["cost_bits"], 161_792.0, places=6)
+        self.assertLess(verdict["gain_bits"], 5.0)
+        self.assertGreater(verdict["cost_bits"] / verdict["gain_bits"], 30_000.0)
+        self.assertFalse(verdict["admitted"])
+        self.assertEqual(verdict["reason"], "uneconomic")
+        # Break-even horizon at that gain: ~780,000 ticks (~21,700 runs).
+        horizon = verdict["cost_bits"] / (
+            KAPPA_BITS_PER_ERROR * verdict["dbar"]
+        )
+        self.assertGreater(horizon, 700_000.0)
+        self.assertLess(horizon, 900_000.0)
+
+    def test_the_floor_never_reads_the_in_sample_sample(self) -> None:
+        evidence = [(1, 0.9, 1.0), (2, 0.8, 1.0)]
+        without = record_with(evidence=evidence)
+        with_sample = record_with(
+            evidence=list(evidence), in_sample=(0, 99.0, 0.001)
+        )
+        self.assertEqual(MDL_FLOOR.verdict(without), MDL_FLOOR.verdict(with_sample))
+        self.assertAlmostEqual(
+            MDL_FLOOR.dbar(with_sample), MDL_FLOOR.dbar(without), places=12
+        )
+
+
+# ---------------------------------------------------------------------------
+# Round 12a §1: the in-sample birth sample is evidence's excluded sibling
+# ---------------------------------------------------------------------------
+@requires_artifacts
+class TestInSampleBirthSample(unittest.TestCase):
+    def _organ_and_candidate(self):
+        organ = make_organ(fit_streams={0})
+        batch = _stream_batch()
+        _prime_stream(organ, batch)
+        candidate = organ.birth_candidate(16, fit_window=16)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        return organ, batch, candidate
+
+    def test_the_birth_transition_is_scored_at_birth_and_kept_out_of_evidence(self) -> None:
+        organ, batch, candidate = self._organ_and_candidate()
+        self.assertIsNotNone(candidate.in_sample)
+        assert candidate.in_sample is not None
+        tick, adapted, base = candidate.in_sample
+        self.assertEqual(tick, 16)
+        self.assertGreater(adapted, 0.0)
+        self.assertGreater(base, 0.0)
+        # In-sample by construction: the patch was fitted on this transition.
+        self.assertNotEqual(adapted, base)
+        # It is NOT evidence: at birth the residence set is empty.
+        self.assertEqual(candidate.evidence, [])
+        self.assertEqual(candidate.residence_ticks, 0)
+        # The out-of-sample set is born_tick + 1 onwards only.
+        for frame_tick, transition in ((17, 16), (18, 17), (19, 18), (20, 19)):
+            organ.observe(
+                batch.frames[0, frame_tick], int(batch.actions[0, transition]), stream=0
+            )
+            organ.shadow_scores(frame_tick)
+        self.assertEqual(
+            [sample[0] for sample in candidate.evidence], [17, 18, 19, 20]
+        )
+        self.assertEqual(candidate.residence_ticks, RESIDENCE_N)
+        self.assertNotIn(16, [sample[0] for sample in candidate.evidence])
+        # The ratio is the evidence ratio-of-means: adding the in-sample
+        # sample does not move it.
+        adapted_sum, base_sum = candidate.residence_sums
+        self.assertAlmostEqual(
+            adapted_sum, sum(sample[1] for sample in candidate.evidence), places=12
+        )
+        self.assertAlmostEqual(
+            base_sum, sum(sample[2] for sample in candidate.evidence), places=12
+        )
+        self.assertAlmostEqual(candidate.ratio, adapted_sum / base_sum, places=12)
+        self.assertAlmostEqual(
+            candidate.adapted_mean, adapted_sum / RESIDENCE_N, places=12
+        )
+        # The labelled secondary statistic is a *different* number (and is
+        # labelled precisely because the birth tick is training data).
+        with_in_sample = candidate.with_in_sample_ratio
+        self.assertTrue(np.isfinite(with_in_sample))
+        self.assertAlmostEqual(
+            with_in_sample, (adapted_sum + adapted) / (base_sum + base), places=12
+        )
+        self.assertNotAlmostEqual(with_in_sample, candidate.ratio, places=6)
+
+    def test_the_gate_and_the_floor_ignore_the_in_sample_sample(self) -> None:
+        organ, batch, candidate = self._organ_and_candidate()
+        for frame_tick, transition in ((17, 16), (18, 17), (19, 18), (20, 19)):
+            organ.observe(
+                batch.frames[0, frame_tick], int(batch.actions[0, transition]), stream=0
+            )
+            organ.shadow_scores(frame_tick)
+        qualified = organ.qualified(candidate.candidate_id)
+        verdict = MDL_FLOOR.verdict(candidate)
+        # Drop the in-sample sample entirely: no gate or floor may notice.
+        candidate.in_sample = None
+        self.assertEqual(organ.qualified(candidate.candidate_id), qualified)
+        self.assertEqual(MDL_FLOOR.verdict(candidate), verdict)
+        self.assertTrue(np.isnan(candidate.with_in_sample_ratio))
+        # ... and the summary carries it, labelled.
+        candidate.in_sample = (16, 1.0, 4.0)
+        summary = candidate.summary()
+        self.assertEqual(summary["in_sample"], (16, 1.0, 4.0))
+        self.assertAlmostEqual(
+            summary["with_in_sample_ratio"],
+            (candidate.residence_sums[0] + 1.0) / (candidate.residence_sums[1] + 4.0),
+            places=12,
+        )
+        self.assertEqual(summary["ratio"], candidate.ratio)
+
+
+# ---------------------------------------------------------------------------
+# Round 12a §6: the null patch modes
+# ---------------------------------------------------------------------------
+@requires_artifacts
+class TestNullPatchModes(unittest.TestCase):
+    """Same fit, same K, null substance: the controls never steer the live model."""
+
+    def _organ_with_stream(self) -> PhysicsOrgan:
+        organ = make_organ(fit_streams={0})
+        _prime_stream(organ, _stream_batch())
+        return organ
+
+    def test_every_mode_births_at_the_same_capacity(self) -> None:
+        caps = {}
+        for mode in PATCH_MODES:
+            organ = self._organ_with_stream()
+            candidate = organ.birth_candidate(
+                16, fit_window=DEFAULT_FIT_WINDOW, patch_mode=mode, rng_seed=7
+            )
+            self.assertIsNotNone(candidate, f"mode {mode} was refused at birth")
+            assert candidate is not None
+            caps[mode] = (
+                candidate.overlay.param_count,
+                candidate.overlay.rank,
+                candidate.overlay.budget_n,
+                candidate.overlay.fit_transitions,
+            )
+            self.assertEqual(organ.fit_history[-1].patch_mode, mode)
+            self.assertEqual(organ.fit_history[-1].reason, "")
+            # Never applied, in every mode.
+            self.assertEqual(organ.overlay_table.all_ids(), frozenset())
+            self.assertIsNone(organ._active_overlay_id)
+            self.assertTrue(organ.encoder_bit_identical())
+        self.assertEqual(len(set(caps.values())), 1, f"capacity differs by mode: {caps}")
+        self.assertEqual(caps["fitted"], (5_056, 26, 16, 16))
+
+    def test_zero_patch_scores_exactly_like_the_base(self) -> None:
+        organ = self._organ_with_stream()
+        candidate = organ.birth_candidate(16, patch_mode="zero")
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(int(torch.count_nonzero(candidate.overlay.u)), 0)
+        self.assertEqual(int(torch.count_nonzero(candidate.overlay.v)), 0)
+        self.assertEqual(int(torch.count_nonzero(candidate.overlay.bias)), 0)
+        # The birth sample is already exactly the base score.
+        assert candidate.in_sample is not None
+        self.assertEqual(candidate.in_sample[1], candidate.in_sample[2])
+        # ... and so is every out-of-sample shadow score (exact, not ~).
+        batch = _stream_batch()
+        for frame_tick, transition in ((17, 16), (18, 17)):
+            organ.observe(
+                batch.frames[0, frame_tick], int(batch.actions[0, transition]), stream=0
+            )
+            adapted, base = organ.shadow_scores(frame_tick)[candidate.candidate_id]
+            self.assertEqual(adapted, base)
+        self.assertEqual(candidate.ratio, 1.0)
+        self.assertFalse(candidate.qualified())
+
+    def test_random_and_shuffled_are_deterministic_under_a_fixed_seed(self) -> None:
+        for mode in ("random", "shuffled"):
+            first = self._organ_with_stream().birth_candidate(
+                16, patch_mode=mode, rng_seed=DEFAULT_NULL_SEED
+            )
+            second = self._organ_with_stream().birth_candidate(
+                16, patch_mode=mode, rng_seed=DEFAULT_NULL_SEED
+            )
+            third = self._organ_with_stream().birth_candidate(
+                16, patch_mode=mode, rng_seed=DEFAULT_NULL_SEED + 1
+            )
+            assert first is not None and second is not None and third is not None
+            for left, right in ((first, second),):
+                self.assertTrue(torch.equal(left.overlay.u, right.overlay.u))
+                self.assertTrue(torch.equal(left.overlay.v, right.overlay.v))
+                self.assertTrue(torch.equal(left.overlay.bias, right.overlay.bias))
+                self.assertEqual(left.in_sample, right.in_sample)
+            self.assertFalse(torch.equal(first.overlay.u, third.overlay.u))
+
+    def test_random_matches_the_fitted_norms_and_shuffled_moves_the_targets(self) -> None:
+        fitted = self._organ_with_stream().birth_candidate(16, patch_mode="fitted")
+        random = self._organ_with_stream().birth_candidate(
+            16, patch_mode="random", rng_seed=DEFAULT_NULL_SEED
+        )
+        shuffled = self._organ_with_stream().birth_candidate(
+            16, patch_mode="shuffled", rng_seed=DEFAULT_NULL_SEED
+        )
+        assert fitted is not None and random is not None and shuffled is not None
+        for name in ("u", "v", "bias"):
+            self.assertAlmostEqual(
+                float(torch.linalg.norm(getattr(random.overlay, name))),
+                float(torch.linalg.norm(getattr(fitted.overlay, name))),
+                places=6,
+            )
+            # The random null is a different patch, not the fitted one.
+            self.assertFalse(
+                torch.equal(getattr(random.overlay, name), getattr(fitted.overlay, name))
+            )
+        # "shuffled" is the identical fit on permuted targets: the window it
+        # was fitted on is a different window, so its loss_before differs.
+        self.assertNotAlmostEqual(
+            shuffled.overlay.loss_before, fitted.overlay.loss_before, places=6
+        )
+        self.assertLess(shuffled.overlay.loss_after, shuffled.overlay.loss_before)
+        self.assertFalse(torch.equal(shuffled.overlay.u, fitted.overlay.u))
+
+    def test_an_unknown_mode_raises(self) -> None:
+        organ = self._organ_with_stream()
+        with self.assertRaises(ValueError):
+            organ.birth_candidate(16, patch_mode="spectral")
+        with self.assertRaises(ValueError):
+            organ.fit_overlay(_window_motif(1, 16), 16, patch_mode="nope")
+
+
+# ---------------------------------------------------------------------------
+# Round 12a §5: the derived motif thresholds (criterion M)
+# ---------------------------------------------------------------------------
+class TestMotifThresholdDerivation(unittest.TestCase):
+    """The pair is derived from the null process, not tuned."""
+
+    def test_the_table_is_reproduced(self) -> None:
+        # Independent closed forms for the two gap-independent rows: at least
+        # one support, at least two supports, over 36 iid 1 %/tick ticks.
+        p0, ticks = 0.01, 36
+        self.assertAlmostEqual(
+            null_false_declaration_probability(1, 1), 1.0 - (1.0 - p0) ** ticks, places=12
+        )
+        two_plus = 1.0 - (1.0 - p0) ** ticks - ticks * p0 * (1.0 - p0) ** (ticks - 1)
+        self.assertAlmostEqual(
+            null_false_declaration_probability(2, 1), two_plus, places=12
+        )
+        # The pre-registered table rows (docs/round12a-prereg.md §5), pinned
+        # to 1e-6 as required by the round contract.
+        self.assertAlmostEqual(
+            null_false_declaration_probability(2, 2), 0.009784, delta=1e-6
+        )
+        self.assertAlmostEqual(
+            null_false_declaration_probability(3, 1), 0.005581, delta=1e-6
+        )
+        self.assertAlmostEqual(
+            null_false_declaration_probability(1, 1), 0.30359, delta=1e-4
+        )
+        self.assertAlmostEqual(
+            null_false_declaration_probability(2, 1), 0.05035, delta=1e-4
+        )
+        self.assertAlmostEqual(
+            null_false_declaration_probability(3, 2), 0.00146, delta=1e-4
+        )
+        # Monotone in both gates, and exactly zero when nothing can declare.
+        self.assertGreater(
+            null_false_declaration_probability(2, 1),
+            null_false_declaration_probability(2, 2),
+        )
+        self.assertGreater(
+            null_false_declaration_probability(2, 2),
+            null_false_declaration_probability(3, 2),
+        )
+        # One tick can only ever produce one support: (1, 1) fires exactly
+        # with probability p0, and (2, 2) cannot fire at all.
+        self.assertEqual(null_false_declaration_probability(1, 1, ticks=1), p0)
+        self.assertEqual(null_false_declaration_probability(2, 2, ticks=1), 0.0)
+
+    def test_the_implemented_streak_rule_is_the_stricter_one(self) -> None:
+        """The pre-registered table reads ``gap`` as intervening ticks; the code
+        compares tick distance.  The code's rule gives the *smaller* false
+        probability, so criterion M holds under both and the derived pair is
+        unchanged.  Both numbers are pinned so the off-by-one cannot drift.
+        """
+        self.assertAlmostEqual(
+            null_false_declaration_probability(2, 2, rule="distance"),
+            0.006718,
+            delta=1e-6,
+        )
+        self.assertLess(
+            null_false_declaration_probability(2, 2, rule="distance"),
+            null_false_declaration_probability(2, 2),
+        )
+        self.assertLessEqual(null_false_declaration_probability(2, 2), 0.01)
+        self.assertLessEqual(
+            null_false_declaration_probability(2, 2, rule="distance"), 0.01
+        )
+        # Only the closeness rule differs for the rows where it matters.
+        for count, persistence in ((1, 1), (2, 1), (3, 1)):
+            self.assertAlmostEqual(
+                null_false_declaration_probability(count, persistence, rule="distance"),
+                null_false_declaration_probability(count, persistence),
+                places=12,
+            )
+        with self.assertRaises(ValueError):
+            null_false_declaration_probability(2, 2, rule="nonsense")
+
+    def test_the_operating_constants_are_the_derived_pair(self) -> None:
+        self.assertEqual(MOTIF_MIN_COUNT, 2)
+        self.assertEqual(MOTIF_MIN_PERSISTENCE, 2)
+        # The declared selection: smallest pair in (c+p, -p) order with c >= 2
+        # and P_false <= 1 % -- recomputed here from the enumeration.
+        candidates = [
+            (count, persistence)
+            for count in range(2, 6)
+            for persistence in range(1, 6)
+            if null_false_declaration_probability(count, persistence) <= 0.01
+        ]
+        self.assertTrue(candidates)
+        chosen = min(candidates, key=lambda pair: (pair[0] + pair[1], -pair[1]))
+        self.assertEqual(chosen, (MOTIF_MIN_COUNT, MOTIF_MIN_PERSISTENCE))
+        # The pair sits at the 1 % boundary: the rejection of (2, 1) is what
+        # makes it the derived one.
+        self.assertGreater(null_false_declaration_probability(2, 1), 0.01)
+        # DigestThresholds carries the derived pair and still validates.
+        thresholds = DigestThresholds(
+            debris_threshold=0.4130416682362567,
+            spike_threshold=0.4130416682362567,
+            merge_radius=6.743688811836853,
+            normal_baseline=0.04938631785656374,
+            normal_median=0.02428896352648735,
+            normal_q95=0.17219337970018384,
+            post_flip_mean=0.28597303529750207,
+            post_flip_q95=0.7105834186077118,
+            immediate4_mean=0.34670642018318176,
+        )
+        self.assertEqual(thresholds.motif_min_count, MOTIF_MIN_COUNT)
+        self.assertEqual(thresholds.motif_min_persistence, MOTIF_MIN_PERSISTENCE)
+        with self.assertRaises(ValueError):
+            DigestThresholds(
+                debris_threshold=0.4,
+                spike_threshold=0.4,
+                merge_radius=6.7,
+                normal_baseline=0.05,
+                normal_median=0.02,
+                normal_q95=0.17,
+                post_flip_mean=0.28,
+                post_flip_q95=0.71,
+                immediate4_mean=0.34,
+                motif_min_count=0,
+            )
+
+    def test_motif_for_declares_at_two_supports_and_refuses_one(self) -> None:
+        digester = ResidualDigester()
+        thresholds = digester.thresholds
+        self.assertEqual(thresholds.motif_min_count, 2)
+        self.assertEqual(thresholds.motif_min_persistence, 2)
+        residual = np.zeros(DEFAULT_LATENT_DIM)
+        residual[0] = float(np.sqrt(DEFAULT_LATENT_DIM * 0.5))  # surprise 0.5 > q99
+        # One support is not a repeated structure.
+        first = digester.observe(observation(tick=0, residual=residual))
+        self.assertTrue(first.ingested)
+        self.assertIsNone(first.motif)
+        self.assertEqual({cohort.kind for cohort in first.cohorts} - {"trail"}, {"residual"})
+        # A second support inside the streak gap declares (count 2, streak 2).
+        second = digester.observe(observation(tick=1, residual=residual))
+        self.assertIsNotNone(second.motif)
+        assert second.motif is not None
+        self.assertGreaterEqual(second.motif.count, MOTIF_MIN_COUNT)
+        self.assertGreaterEqual(second.motif.persistence, MOTIF_MIN_PERSISTENCE)
+        self.assertIn("motif", {cohort.kind for cohort in second.cohorts})
+        # Two supports further apart than the streak gap do NOT: the streak is
+        # re-origined at 1 (the implemented ``t - last_support <= gap`` rule).
+        gap_digester = ResidualDigester()
+        gap_digester.observe(observation(tick=0, residual=residual))
+        apart = gap_digester.observe(
+            observation(tick=thresholds.motif_streak_gap + 1, residual=residual)
+        )
+        body = gap_digester._bodies[apart.assigned_debris_id]
+        self.assertEqual(body.count, 2)
+        self.assertEqual(body.streak, 1)
+        self.assertIsNone(apart.motif)
 
 
 if __name__ == "__main__":  # pragma: no cover

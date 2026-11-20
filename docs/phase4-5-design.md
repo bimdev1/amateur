@@ -1547,3 +1547,317 @@ because they move or could move a number:**
    differ materially here (0.9555 vs 0.999225 at promotion, where the
    candidate crossed by 0.08 %).  One convention should be pinned for
    Round 12.
+
+---
+
+## 16. Round 12a: conventions and the MDL gain floor (pointer)
+
+Round 12a is **pre-registered** in `docs/round12a-prereg.md` (Lead-owned,
+committed as `538d289`); that file is binding and this section is a pointer,
+not a restatement. It fixes: the birth transition is excluded from a
+candidate's evidence as a **training** transition (train/test separation, not
+storage); `R = sum_t adapted / sum_t base` (ratio-of-means) as the single
+convention for both gate and metric, with `mean_t(adapted/base)` a labelled
+diagnostic; an amortised **MDL gain floor** `kappa * H * dbar > 32K` with
+`kappa = 934.798` bits per (latent² per dim · tick) and `H = 20`; the trigger
+`N >= N_MIN = 2` replacing the absolute `tick >= 16` guard; motif thresholds
+**derived** as `(2, 2)` at a 1 % null false-declaration budget; and four null
+controls (`zero`, `random`, `shuffled`, `no_flip`).
+
+**Ordering.** §17 below was written and committed **before any 12a number
+existed**. It is binding pre-registration: no run has been made, and it may
+not be edited after a 12a result to fit that result.
+
+## 17. Round 12b pre-registration — repeated flips with dwell (NOT RUN in 12a)
+
+**Status: pre-registered, not executed.** No line of this section records a
+measurement. 12b is designed here so that it cannot be shaped by the 12a
+numbers that will arrive first.
+
+### 17.1 Purpose
+
+The registered single-flip trace cannot reach motif persistence: under the
+derived `(2, 2)` thresholds it produces no motif at all (the pre-registered
+expectation of `docs/round12a-prereg.md` §5), so the live half of the ratchet
+— `#21 motif read → #24 live overlay → #25 stale → eviction` — has never run
+on a real trace, only in the 16-stream bank probe and a wiring test. 12b asks
+two questions at once:
+
+1. Is the nursery gate, **at scale**, detecting signal rather than noise?
+2. Does the live half (`#21→#24→#25→evict`) fire end-to-end on a real trace,
+   measured, rather than probe-demonstrated?
+
+**The two questions have different dependencies.** The live half is **not
+downstream of the gain floor**: `#24` adoption is driven by the `#21` motif
+cohort (`_revalidation_token` → `organ.adopt_motif`), while the floor gates
+only the `#22` sediment into D4. A floor that refuses every promotion
+therefore does **not** make `#21→#24→#25→evict` unreachable; it makes the
+*promotion-rate* question of §17.4 vacuous, because under 12a's constants
+every candidate is refused and the real arm would report an empty table.
+§17.4 resolves that with two arms: **R** (registered, floor ON) and **D**
+(diagnostic, floor ablated).
+
+Neither question is answered by 12a, whose scenario is a single episode of
+length `H = 20`.
+
+### 17.2 Scenario (frozen)
+
+Warmup `8` normal frames, then `8` alternating phases of dwell `D = 12`
+ticks, the phase toggling at frames `8, 20, 32, 44, 56, 68, 80, 92`, total
+**104 ticks** (= 8 warmup + 8 × 12). Under the toggle reading — each listed
+frame is a *toggle* — the traced flipped phases are `[8,20)`, `[32,44)`,
+`[56,68)`, `[80,92)`: four flipped episodes of 12 ticks each (48 flipped
+ticks), separated by four normal phases, and the last phase (`[92,104)`) is
+normal with its flip-back landing on the end of the trace. Single stream;
+**seed 7 is the primary trace**; the seed sweep in §17.4 covers seeds 0–31.
+
+Every other constant is inherited from 12a unchanged: `fit_window = 16`,
+capacity `K <= gamma*N*D` with `gamma = 5`, `D = 64`, trigger `N >= N_MIN =
+2`, out-of-sample evidence starting the tick after birth, motif thresholds
+`(2, 2)` with `MOTIF_STREAK_GAP = 2`.
+
+**Why this shape.** A 12-tick phase makes the derived persistence threshold
+reachable: the ingest process is sparse by the q99 definition, and within a
+phase a two-support run at most two ticks apart is reachable, so the motif
+path can fire on a real trace instead of only in a probe. Repeated
+flips also give the promotion decision something to be *wrong* about: a gate
+that promotes on one episode and never again, or that flips its answer with
+the residence window, is visible only when the environment flips more than
+once. The live half must be **measured**, not probe-demonstrated.
+
+### 17.3 Residence sweep
+
+`RESIDENCE_N ∈ {4, 8, 16, 32}`; **no window is designated primary**. For
+every seed, at every window, report the number of candidates born, the number
+promoted (a real, non-zero-confidence `#22` sediment naming the candidate),
+and each candidate's **final cumulative ratio** — ratio-of-means over that
+candidate's out-of-sample evidence at the end of the run, **one value per
+candidate** (§17.4).
+
+**Pre-registered stability rule.** A gate whose promotion decision flips with
+the window for more than **10 % of (seed, candidate) pairs** is
+window-sensitive and is reported as **noise**; the sweep then answers that
+whatever the gate saw is a window artefact. The pairing is well defined
+because `RESIDENCE_N` gates *surfacing*, not birth: a seed's candidate set is
+invariant across windows.
+
+The per-window table is reported for all four windows, and the §17.4 decision
+rule must hold **in all four** — no window may be read as the favourable one.
+
+### 17.4 Seed sweep and decision rule
+
+Seeds **0–31** (32 seeds). Two arms, **each its own executions**: a
+promotion removes the candidate from the nursery (it is pruned after the
+`#22` lineage consumption), so the floor changes the trace from the
+promotion tick onward — Arm R and Arm D are separate runs, not two readings
+of one run (§17.7 sizes both).
+
+**Arm R — registered, primary, floor ON.** The 12a gain floor is applied with
+the same `kappa` and `H = dwell = 12`. Under 12a §3.5 every candidate is
+expected to be refused, so Arm R reports: **0 promotions expected**, ADMISSION
+**vacuous** and said so explicitly, and the **floor-refusal reason per
+candidate** — `harmful` (`dbar <= 0`) vs `uneconomic` (`0 < gain <= cost`),
+with `gain` and `cost` in bits. That table is a **measured finding**; it is
+**not** the sweep's answer to "signal or noise".
+
+**Arm D — declared diagnostic, secondary, floor ABLATED (pre-floor gate).**
+Labelled `diagnostic_only_pre_floor` in every table header and in the
+summary. This is where the promotion rate and the final-cumulative-ratio
+distribution are measured, and where the decision rule applies. It is a
+diagnostic, never a gate verdict.
+
+**Decision rule (Arm D only).** Signal **iff** both hold:
+
+* (a) the Arm-D real promotion rate exceeds the **pooled** null promotion
+  rate (`zero` + `random` + `shuffled`, Fisher exact, `alpha = 0.05`); each
+  null is also reported **pairwise** against real, with **no multiplicity
+  correction** (three comparisons share `alpha`; the summary says so), **and**
+* (b) the 95 % CI of the median final cumulative ratio **excludes** `1.0`,
+  by **bootstrap with 10,000 resamples, seed `20261120`**.
+
+The rule must hold in **all four** windows (§17.3). If the distribution
+straddles `1.0` symmetrically, the measured object is a **random walk** —
+report that, and do not call it adaptation. A negative result is a result and
+is reported as one.
+
+**Empty case, stated so it cannot be misreported.** If Arm D's real
+promotion count is **0**, the rule returns the explicit verdict **"no
+promotion signal under the pre-floor gate"**, and the round reports the
+resident candidates' final-ratio distribution instead. An undefined test is
+never reported as a null result.
+
+**Live half.** The `#21→#24→#25→evict` question is answered by the **motif
+events**, counted identically in both arms (the floor does not touch `#24`);
+it is not read off promotions.
+
+**Conditional escalation (fixed, not data-dependent).** If the seed-7
+primary trace (Arm R or Arm D) yields **fewer than 2 motif cohorts**, 12b
+also runs a declared **`D = 24` arm — 200 ticks (8 warmup + 8 × 24), the same
+toggles scaled to frames `8, 32, 56, 80, 104, 128, 152, 176`** — over the
+same 672-cell grid, and reports both arms side by side. The decision rule is
+unchanged in that arm; only the dwell changes. The trigger is a fixed
+threshold on a pre-declared trace, so the escalation cannot be selected to
+fit an outcome.
+
+### 17.5 Nulls, side by side, in every sweep
+
+**Four nulls, in two shapes.**
+
+**In-cell (three), every seed/window cell, side by side with the real run:**
+`zero` (patch factors and bias exactly zero), `random` (random `u`, `v`,
+`bias` at the rank the capacity admits at `N`), and `shuffled` (the standard
+fit with targets permuted inside the fit window) — the same constructions as
+12a, pipelined identically (same trigger, organ, executor, evidence set,
+gate). A promotion is never reported without its contemporaneous null rate,
+and all three are pooled for the `alpha = 0.05` comparison of §17.4.
+
+**Separate per-seed arm (fourth): `no_flip`.** The registered environment
+with **no toggles at all**, the same **104 ticks**, one run per seed
+(**32 runs**), reporting **births and promotions only**. Its flipped tick set
+is empty, so the primary metric is undefined on it and it is **excluded from
+the metric table** — but its promotions stay observable, which is the null's
+actual question. It is not window-swept (there is no flipped phase for the
+window to gate); the single window setting used for its promotion count is
+recorded in the run summary.
+
+Total: four nulls — three in-cell, `no_flip` as its own per-seed arm.
+
+### 17.6 Metrics and gain floor
+
+* **Primary:** ratio-of-means `R = sum_t adapted / sum_t base` over the
+  declared flipped **out-of-sample** tick set (`ADAPTATION_SET_12b`: ticks
+  with `phase == "flipped"`, shadow-scored, and not the candidate's birth
+  tick).
+* **Secondary, always labelled:** `mean_t(adapted/base)` (mean-of-ratios).
+* **Both samples, both labelled:** `with_in_sample` adds the birth-tick
+  sample to the set. Both numbers are reported for every promotion and every
+  candidate, and **both tick sets are listed explicitly** in the run summary
+  (never inferred). When the birth tick is inside a flipped phase (the
+  Round-11 seed-7 case) the two sets differ; when it is not, they coincide and
+  the summary says so — the sets are listed either way.
+* **Gain floor (Arm R only).** The same `kappa` as adjudicated in 12a (value
+  frozen in `docs/round12a-prereg.md` §3.3, not restated here), applied with
+  `H = dwell = 12`. **`H = 12` is one dwell episode — explicitly not the
+  same object as 12a's `H = 20`** (12a's was one flipped episode of a
+  36-tick trace that never returned to normal). Amortising one of four
+  episodes while the patch stays resident across the normal phases is
+  **conservative**, it uses the **same `kappa`**, and it is **not
+  re-derived** here. The 12a sensitivity table (pre-registered in that same
+  document, §3.5) is the evidence that the verdict is robust in `H` out to
+  roughly `10^5` ticks. Arm D ablates this floor and is labelled
+  `diagnostic_only_pre_floor` wherever it is reported (§17.4).
+
+### 17.7 Cost model and sample
+
+**The grid: 672 executions.**
+
+| block | runs | arithmetic |
+| --- | --- | --- |
+| Arm R real (floor ON, 32 seeds × 4 windows) | 128 | 32 × 4 × 1 |
+| Arm D real (floor ABLATED, 32 seeds × 4 windows) | 128 | 32 × 4 × 1 |
+| Arm D in-cell nulls `zero`/`random`/`shuffled` (32 seeds × 4 windows each) | 384 | 32 × 4 × 3 |
+| `no_flip`, floor ABLATED, one per seed (promotion count only) | 32 | 32 × 1 |
+| **total** | **672** | 128 + 128 + 384 + 32 |
+
+The null comparison lives in **Arm D**: under the floor the null promotion
+rate is 0 by construction, so a real-vs-null test there would be vacuous.
+Arm R has no null block for that reason; its job is the registered refusal
+account at scale (12a already measured the four nulls at one seed). The
+`no_flip` arm is floor-ablated for the same reason — its promotions are the
+observable.
+
+**Wall time, from a measured basis (labelled an estimate throughout):**
+1.63 s / 36 ticks = 0.045 s/tick.
+
+| quantity | value | basis |
+| --- | --- | --- |
+| measured 36-tick registered run | **1.63 s** | `.work/round11/round11.json` → `seed7_registered.wall_seconds` (Round-11 wave-3 scratch record, `measure.py`) |
+| per-tick marginal | 0.045 s | 1.63 / 36 |
+| one 104-tick run | **≈ 4.7 s** | × 104, linear extrapolation — **an estimate** |
+| 672 runs, serial | ≈ 3,158 s ≈ **53 min** | 672 × 4.7 |
+| 672 runs, 8 threads | ≈ **7 min** | ÷ 8, assumes near-linear scaling — **an estimate** |
+| conditional `D = 24` arm: one 200-tick run | ≈ 9.1 s | × 200 — **an estimate** |
+| conditional `D = 24` arm: 672 runs | ≈ 6,115 s ≈ **102 min** serial (≈ 13 min on 8 threads) | 672 × 9.1 |
+| both arms, serial, worst case | ≈ **2.6 h** | 53 + 102 min |
+| cross-check | 431 tests in 50–63 s | `docs/TESTING.md`, Round-11 closeout |
+
+The extrapolation is coarse (the 36-tick run contains one fit; a 104-tick
+run contains several, and per-tick cost is not uniform), so it is a
+*forecast*, not a budget fact. The first 104-tick run is timed and the grid
+is re-priced before the sweep starts. **If the grid must shrink, it is
+shrunk before any outcome is read, and the revision is recorded here with
+its date** — not after a promising or unpromising partial result.
+
+### 17.8 Honesty
+
+12b is **not run in 12a**. No **12a measurement** appears in §17: the only
+numbers are frozen design constants (warmup, dwell, tick count, seed range,
+thresholds, the `H = 12` declaration, the bootstrap seed), the grid
+arithmetic, and the wall-clock forecast in §17.7, which is labelled an
+estimate. The `~10^5` figure in §17.6 is a **grid point of 12a's
+pre-registered sensitivity table**, not a measurement. The design is **frozen
+with this commit**; any later change is a new revision of this section,
+dated, with its reason, and never an edit that makes a result look better.
+
+### 17.9 Reported spec ambiguities and the Lead's adjudication
+
+Each item is the ambiguity as first reported, then the Lead's ruling.
+`RESOLVED` means the ruling is folded into §17.1–§17.8 above; `CONFIRMED`
+means the point stands as written; `RECORDED` means the execution shape is
+fixed here because the grid arithmetic depends on it.
+
+1. **Null count vs "same constructions as 12a" — RESOLVED.** Four nulls:
+   `zero`/`random`/`shuffled` in every seed/window cell, `no_flip` as a
+   separate per-seed arm; grid `672` (§17.5, §17.7).
+   The 640-run and 512-run readings are withdrawn. **Grid corrected by the
+   Lead after review: 544 -> 672.** A promotion prunes the candidate, so the
+   floor does change the trace; Arms R and D are separate executions, and
+   the real-vs-null comparison belongs to Arm D (under the floor the null
+   rate is 0 by construction). Blocks: Arm R real 128, Arm D real 128, Arm D
+   nulls 384, `no_flip` 32.
+2. **Gain floor vs purpose — RESOLVED, with a correction to the report.**
+   The live half is **not** downstream of the floor: `#24` adoption is driven
+   by the `#21` motif cohort (`_revalidation_token` → `organ.adopt_motif`);
+   the floor gates only the `#22` D4 sediment. What the floor makes vacuous
+   is the promotion-rate/ratio question, so the sweep declares **Arm R**
+   (floor ON, registered; 0 promotions expected, refusal reasons reported)
+   and **Arm D** (floor ABLATED, diagnostic-only; the decision rule applies
+   there). The live-half question is answered by **motif events**, which are
+   identical in both arms (§17.1, §17.4).
+3. **`H` is a different object than in 12a — RESOLVED.** Declared: `H = 12`
+   is **one dwell episode** (12a's `H = 20` was one episode of a different
+   trace shape), conservative, same `kappa`, not re-derived (§17.6).
+4. **Seed-sweep window unstated — RESOLVED.** No window is designated
+   primary; the decision rule must hold in **all four**, the per-window table
+   is reported for all four, and the ≤10 % window-flip stability rule stands
+   (§17.3).
+5. **Statistic definitions.** The spec text says "for every seed report
+   born/promoted/final cumulative ratio", which does not say whether the
+   ratio is per candidate or per seed; §17.3 reads it as **per candidate**
+   (ratio-of-means over that candidate's out-of-sample evidence at the end
+   of the run) and §17.4 still does not say which population its distribution
+   covers. "Fisher exact … alpha = 0.05" does not say against which null, nor
+   whether `alpha` is shared across three comparisons (no multiplicity
+   control is declared). The 95 % CI method for the median is not declared.
+   With promotion count expected to be zero (point 2), both the Fisher table
+   and the ratio distribution are empty cases whose verdict the rule does not
+   state.
+6. **"Flip" changes meaning.** In Round 11/12a "flip at tick 8" means *enter
+   the flipped phase*; here the same word means *toggle*. Only the toggle
+   reading makes "8 alternating phases" and 104 ticks consistent (four
+   flipped episodes, 48 flipped ticks). §17.2 states that reading
+   explicitly.
+7. **Forward reference inside §17.** §17.6 cites the 12a sensitivity table
+   and "`~10^5` ticks" while §17.8 says no number in §17 is a 12a
+   measurement — the `10^5` is a grid point of 12a's *pre-registered*
+   table, not a 12a measurement. §17.8 now says "measurement" to make the
+   intent exact.
+8. **Expected firing count of the live half is not estimated.** Under 12a's
+   own null enumeration, `P_false(2,2)` is 0.978 % over the registered 36
+   ticks, i.e. roughly a third of that over one 12-tick phase; the grid's
+   `512 × 4 = 2,048` flipped phases therefore expect on the order of a few
+   motif firings in total, not hundreds. The live half may be *reachable* but
+   barely *measured*, and §17.7 sizes only wall time, not the expected number
+   of events. No fallback (a longer dwell arm, or more phases) is declared
+   if that count comes back zero. The numbers here are an order-of-magnitude
+   reading of 12a's pre-registered table, not a measurement.

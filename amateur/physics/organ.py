@@ -141,6 +141,7 @@ from .env import PhysicsEnv, WorldConfig
 from .micro_lewm import MicroLeWM
 
 __all__ = [
+    "AMORTISATION_HORIZON",
     "COHORT_KINDS",
     "CandidateRecord",
     "CandidateTable",
@@ -152,6 +153,9 @@ __all__ = [
     "DigestedDebris",
     "EvidenceBudget",
     "FitRecord",
+    "GainFloor",
+    "KAPPA_BITS_PER_ERROR",
+    "MDL_FLOOR",
     "NurseryTick",
     "NurseryTrace",
     "Observation",
@@ -164,6 +168,7 @@ __all__ = [
     "ResidualDigester",
     "StructuralMotif",
     "derive_thresholds",
+    "null_false_declaration_probability",
 ]
 
 #: Default artifact paths (relative to the repo root; ``.work`` is ignored).
@@ -175,29 +180,57 @@ DEFAULT_LATENT_DIM = 64
 
 #: Design constants.  ``DEBRIS_CAPACITY`` and ``OVERLAY_CAPACITY`` mirror the
 #: executor's D2 capacity (``amateur/payloads.py::MAT_CAPACITY == 4``).
-#: ``MOTIF_MIN_COUNT`` is the smallest measured separating window (the
-#: phase-3 doc's "first 4 post-flip" window, 10.03x normal); four residuals
-#: at the measured 1 % normal false-positive rate are statistically decisive.
-#: ``MOTIF_MIN_PERSISTENCE`` is *probe-derived*: forward-generalising patches
-#: appear at >= 10 post-flip ticks of banked support (measured in the design
-#: memo), so adoption waits for that depth.
 #:
-#: **Measured reachability (Round 11 wave 3, registered single-stream
-#: scenario, 36 ticks).**  Seed 7: 6 ingest ticks (12, 19, 25, 28, 29, 30),
-#: longest support streak 1, largest body count 2.  Seed 0: 5 ingest ticks
-#: (9, 10, 11, 12, 14), longest support streak 2, largest body count 3.
-#: Both motif gates are therefore unreachable on one stream (persistence 10,
-#: count 4), and the run produces **no motif cohort at all**: the ``#21`` ->
-#: ``#24`` live-overlay path does not fire.  The gate was derived on a
-#: multi-stream bank, so this is a *reported limitation* of the
-#: single-stream regime, not a tuned constant: both values are unchanged and
-#: no threshold is relaxed to make the path reachable.  The end-to-end
-#: lifecycle is demonstrated by the 16-stream
-#: :meth:`PhysicsOrgan.nursery_scenario` probe (POST-HOC PROBE / NOT A GATE).
+#: **The motif thresholds are derived, not tuned (Round 12a, criterion M).**
+#: The previous pair (``4``/``10``) was calibrated on a multi-stream bank and
+#: is unreachable on one stream.  Criterion M: the pair must keep the **null
+#: false-declaration probability** over the registered ``T = 36``-tick run at
+#: or below the 1 % that already defines the debris/spike threshold
+#: (``debris_threshold`` is the normal q99, so the null process is one
+#: independent 1 %-per-tick ingest) under the implemented streak rule
+#: (``MOTIF_STREAK_GAP``).  ``(c, p)`` is the smallest pair in ``(c + p, -p)``
+#: order with ``c >= 2`` -- a single observation is not a repeated structure --
+#: and ``P_false <= 0.01``.
+#:
+#: Exact enumeration of the null process
+#: (:func:`null_false_declaration_probability`: dynamic programming over
+#: ``(count, streak, gap)``, all 36 ticks, the body receiving every ingest,
+#: which upper-bounds the true false rate):
+#:
+#: =====  =====  ==========================
+#: c      p      ``P_false``
+#: =====  =====  ==========================
+#: 1      1      30.3587 %
+#: 2      1       5.0346 %
+#: 2      2       0.9784 %   ** derived **
+#: 3      1       0.5581 %
+#: 3      2       0.1460 %
+#: =====  =====  ==========================
+#:
+#: ``(2, 1)`` is rejected (5.0346 % > 1 %); ``(2, 2)`` is the derived pair
+#: (0.9784 % <= 1 %) and precedes ``(3, 1)`` in the declared order.  **The
+#: pair sits at the 1 % boundary**, so a firing on the registered trace is
+#: weak evidence: the live half is still demonstrated end-to-end only by the
+#: 16-stream probe and by the 12b repeated-flip scenario.  The derivation is
+#: *statistical*, from the normal-regime ingest process; it is not fitted to
+#: any seed's observed support pattern, and nothing was relaxed to make the
+#: live path reachable.
+#:
+#: **Measured reachability, re-read under the derived pair (Round 11 wave 3
+#: record, re-measured in Round 12a).**  Registered single-stream scenario,
+#: 36 ticks: seed 7 ingests on ticks (12, 19, 25, 28, 29, 30), longest support
+#: streak 1, largest body count 2; seed 0 ingests on (9, 10, 11, 12, 14),
+#: longest support streak 2, largest body count 3.  Under ``(2, 2)`` seed 7
+#: still produces **no motif** (streak 1 < 2) and seed 0 **does** reach the
+#: motif path (streak 2 >= 2, count 3 >= 2).  That is the pre-registered
+#: consequence, reported as a measured fact of the derivation -- seed 0 is the
+#: control, not a success.
 DEBRIS_CAPACITY = 8
 OVERLAY_CAPACITY = 4
-MOTIF_MIN_COUNT = 4
-MOTIF_MIN_PERSISTENCE = 10
+#: Derived per regime (criterion M); both are pinned by tests against
+#: :func:`null_false_declaration_probability` and the pre-registered table.
+MOTIF_MIN_COUNT = 2
+MOTIF_MIN_PERSISTENCE = 2
 ROLLOUT_HORIZON = 4
 WINDOW_FRAMES = 3
 STALE_PATIENCE = 2
@@ -206,6 +239,13 @@ COOLDOWN_TICKS = 4
 #: A stable motif may miss an isolated support tick; two consecutive misses reset.
 MOTIF_STREAK_GAP = 2
 DEFAULT_PATCH = "head"
+#: Round 12a §6 -- the four birth patch modes.  ``"fitted"`` is the registered
+#: path; the other three are **experimental null controls** run through the
+#: identical trigger/evidence/gate pipeline.  They never steer the live model:
+#: :meth:`PhysicsOrgan.adopt_motif` always fits ``"fitted"``.
+PATCH_MODES = ("fitted", "zero", "random", "shuffled")
+#: The RNG seed the null controls use when the caller passes none.
+DEFAULT_NULL_SEED = 0x5EED
 DEFAULT_FIT_STEPS = 40
 DEFAULT_FIT_LR = 1e-3
 DEFAULT_CACHE_LEN = 64
@@ -216,6 +256,118 @@ DEFAULT_FIT_WINDOW = 16
 #: ``amateur.payloads.COHORT_KINDS`` (one string vocabulary, two modules: the
 #: organ produces the tags, the payload layer transports them).
 COHORT_KINDS = ("motif", "scaffold", "trail", "residual")
+
+
+# --------------------------------------------------------------------------
+# Round 12a (criterion M): the null-process false-declaration probability
+# --------------------------------------------------------------------------
+def null_false_declaration_probability(
+    count_min: int,
+    persistence_min: int,
+    ticks: int = 36,
+    p0: float = 0.01,
+    gap: int = MOTIF_STREAK_GAP,
+    *,
+    rule: str = "intervening",
+) -> float:
+    """P(at least one false motif declaration) for an iid ``p0`` support process.
+
+    The null process is the registered run's **normal** regime: ``ticks``
+    independent Bernoulli(``p0``) supports (``p0 = 1 %`` by construction of
+    the q99 debris threshold) delivered to the same body -- an upper bound on
+    the true false rate, because a real body only sees the ingests assigned to
+    it.  The DP state is ``(count, streak, gap)``, exactly what
+    :meth:`_Body.absorb` tracks: a support always increments ``count``, and
+    increments ``streak`` iff it is close enough to the previous support,
+    otherwise the streak is re-origined at 1.  A **declaration** is a support
+    tick satisfying ``count >= count_min`` *and*
+    ``streak >= persistence_min`` -- the conjunction
+    :meth:`ResidualDigester._motif_for` applies, which is only reached while
+    the assigned body has just been supported (so support ticks only).
+
+    A freshly created body already has ``count == 1`` and ``streak == 1``
+    (:meth:`ResidualDigester.observe`), so the first support starts the window
+    rather than continuing it.
+
+    ``rule`` selects the closeness test, and the two readings differ by one
+    tick:
+
+    ``"intervening"`` (default, **the pre-registered reading**)
+        ``gap`` counts the *missed ticks between* two supports: a support at
+        ``t`` continues the streak iff ``t - last_support - 1 <= gap``.  This
+        is the reading that reproduces ``docs/round12a-prereg.md`` §5 exactly
+        (``(2, 2) -> 0.978403 %``).
+    ``"distance"``
+        the literal ``t - last_support <= gap`` test of
+        :meth:`_Body.absorb`.
+
+    The **code implements the stricter test**:
+    ``null_false_declaration_probability(2, 2, rule="distance")`` is
+    0.671758 %, below the pre-registered 0.978403 %.  The pre-registered
+    number is therefore a conservative upper bound on the implemented rule,
+    criterion M (``<= 1 %``) holds under both readings, and the derived pair
+    ``(2, 2)`` is unchanged either way.  The off-by-one is reported as an
+    ambiguity and both numbers are pinned by tests.
+    """
+    if rule not in ("intervening", "distance"):
+        raise ValueError(f"unknown streak rule {rule!r}")
+    count_min = int(count_min)
+    persistence_min = int(persistence_min)
+    ticks = int(ticks)
+    gap = int(gap)
+    p0 = float(p0)
+    if count_min < 1 or persistence_min < 1:
+        raise ValueError("count_min and persistence_min must be >= 1")
+    if ticks < 0:
+        raise ValueError("ticks must be >= 0")
+    if not 0.0 <= p0 <= 1.0:
+        raise ValueError("p0 must be a probability")
+    if gap < 0:
+        raise ValueError("gap must be >= 0")
+    #: Elapsed ticks since the last support, capped just past ``gap``: any
+    #: larger value can only break the streak, so it collapses into one state.
+    stale = gap + 1
+    #: ``(count, streak, elapsed) -> probability``; ``elapsed is None`` before
+    #: the first support.
+    states: dict[tuple[int, int, int | None], float] = {(0, 1, None): 1.0}
+    declared = 0.0
+    for _ in range(ticks):
+        nxt: dict[tuple[int, int, int | None], float] = {}
+        for (count, streak, elapsed), prob in states.items():
+            # No support this tick: the streak stands, time moves on.
+            quiet = (
+                count,
+                streak,
+                None if elapsed is None else min(stale, elapsed + 1),
+            )
+            nxt[quiet] = nxt.get(quiet, 0.0) + prob * (1.0 - p0)
+            # A support this tick: count always increments.
+            if elapsed is None:
+                new_streak = 1  # a new body starts at streak == 1
+            else:
+                distance = elapsed + 1
+                close = (
+                    distance <= gap
+                    if rule == "distance"
+                    else distance - 1 <= gap
+                )
+                new_streak = streak + 1 if close else 1
+            hit = (count + 1, new_streak, 0)
+            nxt[hit] = nxt.get(hit, 0.0) + prob * p0
+        declared += sum(
+            prob
+            for (count, streak, elapsed), prob in nxt.items()
+            if elapsed == 0
+            and count >= count_min
+            and streak >= persistence_min
+        )
+        # First-hit decomposition: a declared path cannot declare again.
+        states = {
+            key: prob
+            for key, prob in nxt.items()
+            if not (key[0] >= count_min and key[1] >= persistence_min)
+        }
+    return float(declared)
 
 
 # --------------------------------------------------------------------------
@@ -338,6 +490,121 @@ def _default_thresholds() -> DigestThresholds:
             latent_dim=DEFAULT_LATENT_DIM,
         )
         return derive_thresholds(recorded)
+
+
+# --------------------------------------------------------------------------
+# Round 12a §3: the amortised MDL gain floor on promotion
+# --------------------------------------------------------------------------
+#: Exchange constant from latent-squared-per-dimension error mass to **bits**
+#: (``docs/round12a-prereg.md`` §3.2-3.3).  The organ's ``surprise`` is a mean
+#: *squared* latent prediction error, and the model's code length for a latent
+#: residual ``r`` under its own Gaussian predictive model with per-component
+#: variance ``sigma**2`` is
+#:
+#:     L = (d/2) log2(2 pi sigma**2) + ||r||**2 / (2 sigma**2 ln 2)   bits
+#:
+#: The patch moves the mean, not the declared variance, so only the second
+#: term changes: with ``s = ||r||**2 / d``, ``dL = kappa * ds`` and
+#:
+#:     kappa = d / (2 * sigma**2 * ln 2)
+#:
+#: with ``d = 64`` (:attr:`Phase3Stats.latent_dim`) and
+#: ``sigma**2 = normal_mean = 0.04938631785656374`` -- the phase-3 measured
+#: **in-distribution** mean surprise, i.e. the variance the model's own code
+#: actually assumes (a model trained on normal data does not widen its
+#: likelihood because the dynamics changed).
+#: ``kappa = 64 / (2 * 0.04938631785656374 * ln 2) = 934.7982054975386`` bits
+#: per (latent^2 per dim * tick); one tick of residual magnitude costs
+#: ``d / (2 ln 2) = 46.2`` bits at this operating point.  Sensitivity variant
+#: (prereg §3.3): with ``sigma**2 = post_flip_mean`` instead,
+#: ``kappa = 161.43564465936234``.
+KAPPA_BITS_PER_ERROR = 934.7982054975386
+#: ``H`` -- the amortisation horizon: the registered flipped-episode length
+#: (``POST_FLIP``), the only lifetime the registered 36-tick scenario gives
+#: evidence for.  Amortising beyond the episode is an assumption the evidence
+#: does not support (prereg §3.3).
+AMORTISATION_HORIZON = 20
+
+
+@dataclass(frozen=True)
+class GainFloor:
+    """The pre-registered admission condition ``kappa * H * dbar > 32 * K``.
+
+    ``dbar`` is the candidate's measured **mean per-tick error-mass
+    reduction** over its *out-of-sample* residence evidence
+    (``mean(base - adapted)``, latent^2 per dimension per tick), ``K`` its
+    stored parameter count (:attr:`PredictorOverlay.param_count`), and ``32K``
+    the description cost at the tree-wide uniform 32-bit encoding
+    (``amateur.physics.capacity`` -- the same convention as the capacity law).
+    Strict inequality: a patch that exactly breaks even is refused, and a
+    non-positive reduction is refused as **harmful** before the economics are
+    considered (prereg §3.1, §3.5).
+
+    The floor is a **reading** of evidence the record already carries: it
+    never appends to ``evidence``, never reads ``in_sample`` (that sample is
+    training data, prereg §1) and never mutates a candidate.  ``tau = 32K /
+    (kappa*H)`` is the break-even ``dbar``; at ``H = 20`` the largest
+    admissible patch is ``K < 0.13`` parameters, i.e. none in this evidence
+    regime.
+
+    An empty evidence set has no measured reduction: ``dbar`` is ``nan``,
+    :meth:`admitted` is ``False`` and the reason is ``"uneconomic"`` -- a
+    record with no evidence has no claim to admit.
+    """
+
+    kappa_bits_per_error: float
+    horizon_ticks: int
+
+    def dbar(self, record: CandidateRecord) -> float:
+        """Mean per-tick error-mass reduction over out-of-sample evidence."""
+        if not record.evidence:
+            return float("nan")
+        return float(
+            np.mean([base - adapted for _, adapted, base in record.evidence])
+        )
+
+    def gain_bits(self, record: CandidateRecord) -> float:
+        """``kappa * H * dbar`` -- the bits the patch is worth over its life."""
+        return (
+            float(self.kappa_bits_per_error)
+            * float(self.horizon_ticks)
+            * self.dbar(record)
+        )
+
+    def cost_bits(self, record: CandidateRecord) -> float:
+        """``32 * K`` -- the description cost of the stored patch."""
+        return 32.0 * float(record.overlay.param_count)
+
+    def admitted(self, record: CandidateRecord) -> bool:
+        """The strict condition (an exactly zero gain is refused)."""
+        return bool(self.gain_bits(record) > self.cost_bits(record))
+
+    def verdict(self, record: CandidateRecord) -> dict[str, Any]:
+        """The reported row: the numbers, the decision and its refusal class."""
+        dbar = self.dbar(record)
+        gain_bits = self.gain_bits(record)
+        cost_bits = self.cost_bits(record)
+        admitted = self.admitted(record)
+        if dbar <= 0.0:
+            reason = "harmful"
+        elif not admitted:
+            reason = "uneconomic"
+        else:
+            reason = "admitted"
+        return {
+            "candidate_id": str(record.candidate_id),
+            "dbar": float(dbar),
+            "gain_bits": float(gain_bits),
+            "cost_bits": float(cost_bits),
+            "admitted": bool(admitted),
+            "reason": reason,
+        }
+
+
+#: The pre-registered floor (prereg §3.3), **ratified by the user on
+#: 2026-11-20 before the 12a measurement runs**.  A changed constant means a
+#: re-run, not a re-reading (prereg §3.5).
+MDL_FLOOR = GainFloor(KAPPA_BITS_PER_ERROR, AMORTISATION_HORIZON)
 
 
 # --------------------------------------------------------------------------
@@ -1024,6 +1291,10 @@ class FitRecord:
     judged against (Round 9a).  (Round 11 dropped the ``cooldown`` reason:
     the cooldown now gates :meth:`PhysicsOrgan.adopt_motif`, which returns
     ``None`` without attempting a fit -- there is no fit to refuse.)
+
+    ``patch_mode`` (Round 12a §6) is ``"fitted"`` on the registered path and
+    names the null control otherwise, so an accepted fit can never be confused
+    with a null that was born without the improvement check.
     """
 
     overlay_id: str
@@ -1040,6 +1311,80 @@ class FitRecord:
     budget_max_params: int = 0
     requested_params: int = 0
     reason: str = ""
+    patch_mode: str = "fitted"
+
+
+# --------------------------------------------------------------------------
+# Round 12a §6: the null patch modes (experimental controls, never live)
+# --------------------------------------------------------------------------
+def _check_patch_mode(patch_mode: str) -> str:
+    """Validate a birth patch mode; an unknown mode raises (never a default)."""
+    if patch_mode not in PATCH_MODES:
+        raise ValueError(
+            f"unknown patch_mode {patch_mode!r}; expected one of {PATCH_MODES}"
+        )
+    return patch_mode
+
+
+def _window_loss(
+    model: Any,
+    overlay: PredictorOverlay,
+    z_batch: torch.Tensor,
+    a_batch: torch.Tensor,
+    targets: torch.Tensor,
+    foreground: slice,
+) -> float:
+    """The patch's mean squared error on the fit window (the improvement probe)."""
+    probe = copy.deepcopy(model)
+    probe.eval()
+    overlay.apply_to(probe)
+    with torch.no_grad():
+        predicted = probe.predict(z_batch, a_batch)
+        return float(
+            (predicted[:, foreground] - targets[:, foreground]).pow(2).mean()
+        )
+
+
+def _null_scaled_normals(
+    reference: torch.Tensor, rng: np.random.Generator
+) -> torch.Tensor:
+    """A Gaussian draw with ``reference``'s Frobenius norm (norm-matched null)."""
+    target = float(torch.linalg.norm(reference.detach().reshape(-1)))
+    draw = rng.standard_normal(tuple(reference.shape))
+    norm = float(np.linalg.norm(draw))
+    if target == 0.0 or norm == 0.0:  # pragma: no cover - fitted factors are nonzero
+        return torch.zeros_like(reference)
+    return torch.as_tensor(draw * (target / norm), dtype=reference.dtype)
+
+
+def _null_factors(
+    overlay: PredictorOverlay, patch_mode: str, rng: np.random.Generator
+) -> PredictorOverlay:
+    """Replace a fitted patch's substance with a null control at the same K.
+
+    The rank, the shapes, the parameter count and the budget are untouched;
+    only the stored substance changes, which is what makes the null
+    comparable to the fitted candidate at the same capacity.  ``"shuffled"``
+    is implemented in the fit itself (it permutes the targets), so only
+    ``"zero"``/``"random"`` reach this helper.
+    """
+    if patch_mode == "zero":
+        return replace(
+            overlay,
+            u=torch.zeros_like(overlay.u),
+            v=torch.zeros_like(overlay.v),
+            bias=torch.zeros_like(overlay.bias),
+        )
+    if patch_mode == "random":
+        return replace(
+            overlay,
+            u=_null_scaled_normals(overlay.u, rng),
+            v=_null_scaled_normals(overlay.v, rng),
+            bias=_null_scaled_normals(overlay.bias, rng),
+        )
+    raise ValueError(  # pragma: no cover - guarded by _check_patch_mode
+        f"patch mode {patch_mode!r} is not a factor-substitution null"
+    )
 
 
 @dataclass(frozen=True)
@@ -1276,6 +1621,15 @@ class CandidateRecord:
     ``ratio = adapted_mean / base_mean`` is the residence evidence
     ``#23``/``#22`` read (candidate ``qualified`` iff ``ticks >=
     RESIDENCE_N`` and ``ratio < 1.0``).
+
+    Round 12a §1: ``in_sample`` is the **birth-transition** sample, scored on
+    the same shadow copy at birth.  The birth transition is one of the
+    transitions the patch was fitted on, so it is scoring on training data:
+    it is stored for the labelled secondary statistic
+    :attr:`with_in_sample_ratio` and is **never** appended to ``evidence``,
+    never read by ``#23``/``#22`` and never read by the gain floor
+    (:class:`GainFloor`).  The binding reason is train/test separation, not
+    storage.
     """
 
     candidate_id: str
@@ -1285,6 +1639,9 @@ class CandidateRecord:
     promoted: bool = False
     closed_tick: int | None = None
     cause: str = ""
+    #: ``(tick, adapted, base)`` on the birth transition -- in-sample, never
+    #: evidence (see the class docstring).
+    in_sample: tuple[int, float, float] | None = None
 
     def __post_init__(self) -> None:
         if not self.candidate_id:
@@ -1313,12 +1670,50 @@ class CandidateRecord:
         return float(np.mean([sample[2] for sample in self.evidence]))
 
     @property
+    def residence_sums(self) -> tuple[float, float]:
+        """``(adapted_sum, base_sum)`` over the evidence: the error mass.
+
+        Round 12a §2 makes ``R = sum adapted / sum base`` the primary
+        statistic (gate and metric are one convention), so the runner needs
+        the sums to aggregate across candidates without re-reading
+        ``evidence``.  With one paired sample per resident tick this carries
+        exactly the same ratio as :attr:`ratio`; the sums are the primary
+        form.  A record with no evidence has the empty sum ``(0.0, 0.0)`` --
+        the arithmetic identity the runner's own cross-check computes, so the
+        two can never disagree; the *means* stay ``nan`` because there is no
+        sample to average.
+        """
+        return (
+            float(sum(sample[1] for sample in self.evidence)),
+            float(sum(sample[2] for sample in self.evidence)),
+        )
+
+    @property
     def ratio(self) -> float:
         """``adapted_mean / base_mean``; ``inf`` when there is no valid base."""
         base = self.base_mean
         if not np.isfinite(base) or base <= 0.0:
             return float("inf")
         return float(self.adapted_mean / base)
+
+    @property
+    def with_in_sample_ratio(self) -> float:
+        """SECONDARY, always labelled: ratio-of-means over evidence **plus** the birth sample.
+
+        This is the prereg §1 ``with_in_sample`` statistic and it is **not**
+        the gate: the birth transition is training data.  ``nan`` iff the
+        record carries no ``in_sample`` (the birth tick then had no
+        transition to score).
+        """
+        if self.in_sample is None:
+            return float("nan")
+        adapted_sum = float(sum(sample[1] for sample in self.evidence))
+        base_sum = float(sum(sample[2] for sample in self.evidence))
+        adapted_sum += float(self.in_sample[1])
+        base_sum += float(self.in_sample[2])
+        if base_sum <= 0.0:
+            return float("inf")
+        return float(adapted_sum / base_sum)
 
     def qualified(self, residence_n: int = RESIDENCE_N) -> bool:
         """The #23 selection predicate: enough residence time and a real win."""
@@ -1339,6 +1734,10 @@ class CandidateRecord:
             "base_mean": float(self.base_mean),
             "ratio": float(self.ratio),
             "qualified": bool(self.qualified()),
+            # Round 12a §1/§2: the labelled secondary statistics.  The
+            # in-sample sample is carried, never counted (except here).
+            "in_sample": self.in_sample,
+            "with_in_sample_ratio": float(self.with_in_sample_ratio),
         }
 
 
@@ -2126,6 +2525,8 @@ class PhysicsOrgan:
         *,
         fit_window: int = DEFAULT_FIT_WINDOW,
         stream: int = 0,
+        patch_mode: str = "fitted",
+        rng_seed: int | None = None,
     ) -> CandidateRecord | None:
         """Fit a **shadow** patch and birth it into the nursery (``#18``).
 
@@ -2142,13 +2543,28 @@ class PhysicsOrgan:
         stored in :class:`CandidateTable` as the candidate's substance, and
         a shadow predictor copy is built for it.  ``None`` means the fit was
         refused (the refusal is recorded, never silent).
+
+        Round 12a §1: the birth transition is scored on the same shadow copy
+        and stored as ``record.in_sample`` -- the **labelled secondary**
+        statistic.  It is never appended to ``evidence`` (that set stays
+        out-of-sample only) and no gate reads it.
+
+        Round 12a §6: ``patch_mode`` selects the stored substance
+        (``"fitted"`` is the registered path; ``"zero"``, ``"random"`` and
+        ``"shuffled"`` are experimental null controls run through the
+        identical pipeline).  An unknown mode raises.  A ``"zero"`` candidate's
+        shadow score must equal the base score *exactly*, which is asserted
+        here on the birth transition.
         """
+        patch_mode = _check_patch_mode(patch_mode)
         tick = int(tick)
         if int(fit_window) < 2:
             raise ValueError("fit_window must be >= 2")
         first_tick = max(1, tick - int(fit_window) + 1)
         if first_tick >= tick:
-            self._record_refusal("no-evidence", 0, EvidenceBudget(0), tick=tick)
+            self._record_refusal(
+                "no-evidence", 0, EvidenceBudget(0), tick=tick, patch_mode=patch_mode
+            )
             return None
         motif = StructuralMotif(
             motif_id=f"candidate-window-s{int(stream)}-{tick:04d}",
@@ -2161,7 +2577,9 @@ class PhysicsOrgan:
             first_tick=int(first_tick),
             last_tick=int(tick),
         )
-        overlay = self._fit_overlay(motif, tick)
+        overlay = self._fit_overlay(
+            motif, tick, patch_mode=patch_mode, rng_seed=rng_seed
+        )
         if overlay is None:
             return None
         # No peeking: every fitted transition ends at or before the birth tick
@@ -2170,17 +2588,95 @@ class PhysicsOrgan:
         self._candidate_serial += 1
         candidate_id = f"cand-{self._candidate_serial:02d}"
         overlay = replace(overlay, overlay_id=candidate_id)
+        # A standalone copy of the base *predictor* with the candidate's patch
+        # applied once.  It is never the live model; bit-identity of the live
+        # model is asserted on every ``shadow_scores`` call.
+        shadow = self._build_shadow_predictor(overlay)
+        in_sample = self._birth_sample(shadow, tick, int(stream))
+        if patch_mode == "zero":
+            if int(torch.count_nonzero(overlay.u)) or int(
+                torch.count_nonzero(overlay.v)
+            ) or int(torch.count_nonzero(overlay.bias)):
+                raise AssertionError(
+                    "a zero-patch candidate must carry exactly zero factors and bias"
+                )
+            if in_sample is not None and in_sample[1] != in_sample[2]:
+                raise AssertionError(
+                    "a zero patch must shadow-score exactly like the base "
+                    f"({in_sample[1]!r} != {in_sample[2]!r})"
+                )
         record = CandidateRecord(
             candidate_id=candidate_id,
             overlay=overlay,
             born_tick=tick,
+            in_sample=in_sample,
         )
         self.nursery.birth(record)
-        # A standalone copy of the base *predictor* with the candidate's patch
-        # applied once.  It is never the live model; bit-identity of the live
-        # model is asserted on every ``shadow_scores`` call.
-        self._shadow_predictors[candidate_id] = self._build_shadow_predictor(overlay)
+        self._shadow_predictors[candidate_id] = shadow
         return record
+
+    def _birth_sample(
+        self, shadow: Any, tick: int, stream: int
+    ) -> tuple[int, float, float] | None:
+        """Score the **birth transition** on the shadow copy (in-sample, §1).
+
+        Returns ``(tick, adapted, base)`` or ``None`` when the birth tick has
+        no real transition to score.  The result is stored on the record as
+        ``in_sample`` and never enters ``evidence``: the birth transition is
+        one of the transitions the patch was fitted on, so it is training data
+        and the binding reason is train/test separation (not storage).
+        """
+        transitions = self._transitions_at(tick, stream=int(stream))
+        if not transitions:
+            return None
+        encoder_before = [
+            parameter.detach().clone()
+            for parameter in self.base_model.encoder_parameters()
+        ]
+        base_before = [
+            parameter.detach().clone()
+            for parameter in self.base_model.predictor.parameters()
+        ]
+        working_before = [
+            parameter.detach().clone()
+            for parameter in self.working_model.parameters()
+        ]
+        adapted, base = self._paired_scores(shadow, transitions)
+        self._assert_never_steered(encoder_before, base_before, working_before)
+        if not (np.isfinite(adapted) and np.isfinite(base)):
+            # pragma: no cover - a non-finite birth score is a stream defect
+            return None
+        return (int(tick), float(adapted), float(base))
+
+    def _paired_scores(
+        self,
+        shadow: Any,
+        transitions: Sequence[
+            tuple[int, torch.Tensor, int, torch.Tensor | None, torch.Tensor]
+        ],
+    ) -> tuple[float, float]:
+        """Mean ``(adapted, base)`` squared latent error over the transitions."""
+        adapted_errors: list[float] = []
+        base_errors: list[float] = []
+        with torch.no_grad():
+            for _, prev_latent, action, hidden_before, latent in transitions:
+                z_t = (
+                    prev_latent.unsqueeze(0)
+                    if prev_latent.ndim == 1
+                    else prev_latent
+                )
+                actions = torch.as_tensor([int(action)], dtype=torch.long)
+                adapted_prediction, _ = shadow.step(z_t, actions, hidden_before)
+                base_prediction, _ = self.base_model.predictor.step(
+                    z_t, actions, hidden_before
+                )
+                adapted_error = adapted_prediction.reshape(-1) - latent.reshape(-1)
+                base_error = base_prediction.reshape(-1) - latent.reshape(-1)
+                adapted_errors.append(
+                    float(torch.mean(adapted_error * adapted_error))
+                )
+                base_errors.append(float(torch.mean(base_error * base_error)))
+        return float(np.mean(adapted_errors)), float(np.mean(base_errors))
 
     def _build_shadow_predictor(self, overlay: PredictorOverlay) -> Any:
         shadow = copy.deepcopy(self.base_model.predictor)
@@ -2246,6 +2742,14 @@ class PhysicsOrgan:
         store can never carry it.  The registered run therefore scores
         candidates from ``born_tick + 1`` (out-of-sample only), keeping the
         organ's evidence set identical to the store's.
+
+        Round 12a §1 keeps that split and makes the reason explicit: it is
+        **train/test separation**, not storage.  The excluded birth sample is
+        not thrown away -- :meth:`birth_candidate` stores it on the record as
+        ``in_sample`` and the labelled secondary statistic is
+        :attr:`CandidateRecord.with_in_sample_ratio`.  ``evidence`` (and
+        therefore ``ratio``, ``#23``, ``#22`` and the gain floor) never sees
+        it.
         """
         tick = int(tick)
         transitions = self._transitions_at(tick, stream=stream)
@@ -2275,28 +2779,7 @@ class PhysicsOrgan:
                 scores[record.candidate_id] = (float(existing[1]), float(existing[2]))
                 continue
             shadow = self._shadow_predictor(record)
-            adapted_errors: list[float] = []
-            base_errors: list[float] = []
-            with torch.no_grad():
-                for _, prev_latent, action, hidden_before, latent in transitions:
-                    z_t = (
-                        prev_latent.unsqueeze(0)
-                        if prev_latent.ndim == 1
-                        else prev_latent
-                    )
-                    actions = torch.as_tensor([int(action)], dtype=torch.long)
-                    adapted_prediction, _ = shadow.step(z_t, actions, hidden_before)
-                    base_prediction, _ = self.base_model.predictor.step(
-                        z_t, actions, hidden_before
-                    )
-                    adapted_error = adapted_prediction.reshape(-1) - latent.reshape(-1)
-                    base_error = base_prediction.reshape(-1) - latent.reshape(-1)
-                    adapted_errors.append(
-                        float(torch.mean(adapted_error * adapted_error))
-                    )
-                    base_errors.append(float(torch.mean(base_error * base_error)))
-            adapted = float(np.mean(adapted_errors))
-            base = float(np.mean(base_errors))
+            adapted, base = self._paired_scores(shadow, transitions)
             if not (np.isfinite(adapted) and np.isfinite(base)):
                 continue
             self.nursery.observe(record.candidate_id, tick, adapted, base)
@@ -2490,15 +2973,33 @@ class PhysicsOrgan:
             state.hidden = hidden
 
     # ----------------------------------------------------------- overlay fit
-    def fit_overlay(self, motif: StructuralMotif, tick: int) -> PredictorOverlay | None:
+    def fit_overlay(
+        self,
+        motif: StructuralMotif,
+        tick: int,
+        *,
+        patch_mode: str = "fitted",
+        rng_seed: int | None = None,
+    ) -> PredictorOverlay | None:
         """Public fit entry point (the ratchet calls :meth:`_fit_overlay`).
 
         Exposed so an acceptance probe can fit against a synthetic motif
-        built from the organ's real cached observations.
+        built from the organ's real cached observations.  ``patch_mode`` is
+        the Round 12a §6 null-control switch; production callers leave it at
+        ``"fitted"``.
         """
-        return self._fit_overlay(motif, tick)
+        return self._fit_overlay(
+            motif, tick, patch_mode=patch_mode, rng_seed=rng_seed
+        )
 
-    def _fit_overlay(self, motif: StructuralMotif, tick: int) -> PredictorOverlay | None:
+    def _fit_overlay(
+        self,
+        motif: StructuralMotif,
+        tick: int,
+        *,
+        patch_mode: str = "fitted",
+        rng_seed: int | None = None,
+    ) -> PredictorOverlay | None:
         """Fit a capacity-bounded low-rank ``head.2`` patch on real evidence.
 
         Round 9a (user decision 1): the stored patch scales with the
@@ -2519,7 +3020,48 @@ class PhysicsOrgan:
         * ``no-evidence`` -- no real transitions in the window;
         * ``no-improvement`` -- the stored low-rank patch does not improve
           its own window.
+
+        **Round 12a §6 -- null patch modes.**  ``patch_mode`` selects what
+        substance is *stored*, and the fit budget / steps / seed / capacity
+        bound are identical in every mode (the same ``K``, the same rank, the
+        same ``fit_transitions``):
+
+        ``"fitted"``
+            the registered path: the fitted factors and bias, unchanged.
+        ``"zero"``
+            the identical fit, then factors and bias replaced by exact
+            zeros -- neutral by construction, so its shadow score must be
+            *exactly* the base score (asserted at birth).
+        ``"random"``
+            the identical fit, then factors replaced by Gaussian draws with
+            the **same Frobenius norms** as the fitted factors and the bias by
+            a draw with the fitted bias norm (``rng_seed``, default
+            ``DEFAULT_NULL_SEED``).
+        ``"shuffled"``
+            the identical fit procedure on the **same inputs with the target
+            latents permuted along the fit window's time axis** (one shared
+            permutation across streams, ``rng_seed``, same steps/seed/budget):
+            the patch learns a real map between the wrong pairs.
+
+        The ``no-improvement`` check is always evaluated the way ``"fitted"``
+        evaluates it -- a patch must improve the data it was fitted on -- so a
+        null is born through the *identical* birth pipeline and is refused (or
+        not) by the downstream evidence and gain gate, never by a special
+        case.  For ``zero``/``random`` the fitted patch passes that check
+        first and the record's ``loss_after`` is then re-measured on the
+        **stored** null patch (honest diagnostics: a zero patch reports
+        ``loss_after == loss_before``).  A mode other than these four raises.
+
+        These modes are **experimental controls**; they exist so a null can be
+        run through the identical trigger -> organ -> executor -> evidence ->
+        gate pipeline (prereg §6).  They never steer the live model:
+        :meth:`adopt_motif` -- the only ``#21`` -> ``#24`` path -- always fits
+        ``"fitted"``.
         """
+        patch_mode = _check_patch_mode(patch_mode)
+        rng = np.random.default_rng(
+            DEFAULT_NULL_SEED if rng_seed is None else int(rng_seed)
+        )
         tick = int(tick)
         head_layer = self.base_model.predictor.head[-1]
         latent_dim = int(head_layer.weight.shape[0])
@@ -2549,14 +3091,18 @@ class PhysicsOrgan:
             self.last_budget = EvidenceBudget(
                 0, latent_dim=latent_dim, head_in=head_in
             )
-            self._record_refusal("no-evidence", 0, self.last_budget)
+            self._record_refusal(
+                "no-evidence", 0, self.last_budget, patch_mode=patch_mode
+            )
             return None
         common = min(int(item[1].shape[0]) for item in sequences)
         if common <= lo:
             self.last_budget = EvidenceBudget(
                 0, latent_dim=latent_dim, head_in=head_in
             )
-            self._record_refusal("no-evidence", 0, self.last_budget)
+            self._record_refusal(
+                "no-evidence", 0, self.last_budget, patch_mode=patch_mode
+            )
             return None
         z_batch = torch.stack([item[0][: common + 1] for item in sequences], dim=0)
         a_batch = torch.stack([item[1][: common] for item in sequences], dim=0)
@@ -2568,6 +3114,18 @@ class PhysicsOrgan:
             fit_transitions, latent_dim=latent_dim, head_in=head_in
         )
         self.last_budget = budget
+        # The fit targets.  In every mode but ``shuffled`` these are the real
+        # next latents.  ``shuffled`` permutes them along the fit window's
+        # time axis *before* the fit, keeping inputs, actions, steps, seed and
+        # budget identical: the patch then learns a real map between the wrong
+        # pairs.  One shared permutation across streams (the time axis is the
+        # only thing permuted).
+        targets = z_batch[:, 1:]
+        if patch_mode == "shuffled":
+            targets = targets.clone()
+            perm = rng.permutation(int(common - lo))
+            index = torch.as_tensor(perm, dtype=torch.long)
+            targets[:, foreground] = targets[:, foreground][:, index]
 
         # Capacity gate BEFORE any fit or overlay: the admissible patch class
         # is the capacity-bounded low-rank last-layer delta.
@@ -2582,6 +3140,7 @@ class PhysicsOrgan:
                 patch="full",
                 requested_params=requested,
                 fit_streams=len(sequences),
+                patch_mode=patch_mode,
             )
             return None
         if budget.max_rank < 1:
@@ -2590,6 +3149,7 @@ class PhysicsOrgan:
                 fit_transitions,
                 budget,
                 fit_streams=len(sequences),
+                patch_mode=patch_mode,
             )
             return None
 
@@ -2606,12 +3166,12 @@ class PhysicsOrgan:
         with torch.no_grad():
             before = model.predict(z_batch, a_batch)
             loss_before = float(
-                (before[:, foreground] - z_batch[:, 1:][:, foreground]).pow(2).mean()
+                (before[:, foreground] - targets[:, foreground]).pow(2).mean()
             )
         for _ in range(self.fit_steps):
             optimizer.zero_grad(set_to_none=True)
             prediction = model.predict(z_batch, a_batch)
-            loss = (prediction[:, foreground] - z_batch[:, 1:][:, foreground]).pow(2).mean()
+            loss = (prediction[:, foreground] - targets[:, foreground]).pow(2).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             optimizer.step()
@@ -2623,7 +3183,11 @@ class PhysicsOrgan:
             u_full, s_full, vh_full = torch.linalg.svd(delta_w, full_matrices=False)
         except RuntimeError:  # pragma: no cover - LAPACK failure is not expected
             self._record_refusal(
-                "capacity", fit_transitions, budget, fit_streams=len(sequences)
+                "capacity",
+                fit_transitions,
+                budget,
+                fit_streams=len(sequences),
+                patch_mode=patch_mode,
             )
             return None
         u = (u_full[:, :rank] * s_full[:rank]).contiguous()
@@ -2642,14 +3206,9 @@ class PhysicsOrgan:
             capacity=budget.max_params,
             budget_n=fit_transitions,
         )
-        probe = copy.deepcopy(self.base_model)
-        probe.eval()
-        candidate.apply_to(probe)
-        with torch.no_grad():
-            after = probe.predict(z_batch, a_batch)
-            loss_after = float(
-                (after[:, foreground] - z_batch[:, 1:][:, foreground]).pow(2).mean()
-            )
+        loss_after = _window_loss(
+            self.base_model, candidate, z_batch, a_batch, targets, foreground
+        )
         if not np.isfinite(loss_before) or not np.isfinite(loss_after) or loss_after >= loss_before:
             self._overlay_serial -= 1
             self._record_refusal(
@@ -2658,9 +3217,26 @@ class PhysicsOrgan:
                 budget,
                 rank=rank,
                 fit_streams=len(sequences),
+                patch_mode=patch_mode,
             )
             return None
         overlay = replace(candidate, loss_after=loss_after)
+        if patch_mode in ("zero", "random"):
+            # The *fitted* patch passed the identical improvement check above;
+            # only the stored substance is replaced.  ``loss_after`` is then
+            # re-measured on the stored null patch so the record does not claim
+            # an improvement the stored patch does not have (a zero patch
+            # reports ``loss_after == loss_before`` exactly).
+            overlay = _null_factors(overlay, patch_mode, rng)
+            null_loss = _window_loss(
+                self.base_model, overlay, z_batch, a_batch, targets, foreground
+            )
+            if patch_mode == "zero" and null_loss != loss_before:
+                raise AssertionError(
+                    "a zero patch must reproduce the base window loss exactly "
+                    f"({null_loss!r} != {loss_before!r})"
+                )
+            overlay = replace(overlay, loss_after=null_loss)
         self.fit_history.append(
             FitRecord(
                 overlay_id=overlay.overlay_id,
@@ -2675,6 +3251,7 @@ class PhysicsOrgan:
                 budget_n=fit_transitions,
                 budget_capacity=budget.capacity_params,
                 budget_max_params=budget.max_params,
+                patch_mode=patch_mode,
             )
         )
         return overlay
@@ -2690,6 +3267,7 @@ class PhysicsOrgan:
         requested_params: int = 0,
         rank: int = 0,
         fit_streams: int = 0,
+        patch_mode: str = "fitted",
     ) -> None:
         """Record a refused fit attempt (never silent, Round 9a).
 
@@ -2708,6 +3286,7 @@ class PhysicsOrgan:
                 "capacity_params": (
                     0.0 if budget is None else float(budget.capacity_params)
                 ),
+                "patch_mode": str(patch_mode),
             }
         )
         self.fit_history.append(
@@ -2726,6 +3305,7 @@ class PhysicsOrgan:
                 budget_max_params=0 if budget is None else int(budget.max_params),
                 requested_params=int(requested_params),
                 reason=str(reason),
+                patch_mode=str(patch_mode),
             )
         )
 

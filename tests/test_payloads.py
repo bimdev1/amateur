@@ -20,6 +20,7 @@ executes the executor cannot see a wiring regression.
 """
 from __future__ import annotations
 
+import random
 import unittest
 from types import SimpleNamespace
 
@@ -136,6 +137,60 @@ def _debris(
     debris_id: str, cohorts: tuple[DebrisCohort, ...]
 ) -> DigestedDebrisBody:
     return DigestedDebrisBody(debris_id=debris_id, cohorts=cohorts)
+
+
+def _random_debris_history(seed: int) -> DebrisPool:
+    """A seeded deposit/read/drain/promote/evict sequence for both accounts.
+
+    Every cohort id is unique, as the executor's #19 composite guarantees.
+    The mix is chosen to reach all four issuance fates -- promoted and still
+    resident, resident unpromoted, drained unpromoted, evicted unpromoted --
+    plus the promoted-then-evicted slack (`evicted_promoted`), so the
+    partition is exercised rather than assumed.
+    """
+    rng = random.Random(seed)
+    pool = DebrisPool(capacity=6)
+    counter = 0
+    for step in range(40):
+        resident_ids = [cohort.cohort_id for cohort in pool.bodies()]
+        roll = rng.random()
+        if roll < 0.5 or not resident_ids:
+            n = rng.randint(1, 3)
+            cohorts = tuple(
+                _cohort(
+                    f"c{counter + i}",
+                    rng.choice(COHORT_KINDS),
+                    count=rng.randint(0, 5),
+                    last_tick=step,
+                )
+                for i in range(n)
+            )
+            counter += n
+            body = _debris(f"d{step}", cohorts)
+            pool.deposit(
+                body,
+                Provenance(19, step),
+                step,
+                allow_ceiling_evict=True,
+            )
+        elif roll < 0.7:
+            for kind in COHORT_KINDS:
+                pool.read(kind)
+        elif roll < 0.85:
+            chosen = rng.sample(
+                resident_ids, rng.randint(1, min(2, len(resident_ids)))
+            )
+            pool.drain(tuple(chosen), step)
+        else:
+            candidate = rng.choice(resident_ids)
+            try:
+                pool.promote(candidate, step)
+            except ValueError:  # INV-PROMOTE-ONCE: already promoted
+                pool.read(rng.choice(COHORT_KINDS))
+        if roll >= 0.5 and pool.byte_size() > 1 and rng.random() < 0.15:
+            pool.max_bytes = max(1, pool.byte_size() // 2)
+            pool.evict_to_ceiling(step)
+    return pool
 
 
 def _survivor(
@@ -1317,6 +1372,8 @@ class TestDebrisCohorts(unittest.TestCase):
             "promoted",
             "reads_by_kind",
             "issuance",
+            "conservation_account",
+            "issuance_account",
         })
         self.assertEqual(
             balance["deposits"],
@@ -1325,6 +1382,157 @@ class TestDebrisCohorts(unittest.TestCase):
         self.assertIn("promoted", balance["issuance"])
         self.assertIn("resident_unpromoted", balance["issuance"])
         self.assertIn("drained_unpromoted", balance["issuance"])
+        # Both names, and never one instead of the other: the flat Round-11
+        # keys are the conservation view, the issuance account is separate.
+        self.assertEqual(
+            balance["conservation_account"],
+            {
+                "deposits": balance["deposits"],
+                "resident": balance["resident"],
+                "drained": balance["drained"],
+                "evicted": balance["evicted"],
+                "ceiling_evicted": balance["ceiling_evicted"],
+                "identity": "deposits = resident + drained + evicted",
+                "holds": True,
+            },
+        )
+        self.assertEqual(balance["issuance_account"], balance["issuance"])
+        self.assertTrue(balance["issuance_account"]["holds"])
+        self.assertEqual(
+            balance["issuance_account"]["issued"], balance["deposits"]
+        )
+
+    def test_conservation_and_issuance_accounts_close_on_random_sequences(
+        self,
+    ) -> None:
+        for seed in range(8):
+            with self.subTest(seed=seed):
+                pool = _random_debris_history(seed)
+                conservation = pool.conservation_account()
+                issuance = pool.issuance_account()
+                self.assertTrue(conservation["holds"], msg=conservation)
+                self.assertTrue(issuance["holds"], msg=issuance)
+                self.assertEqual(conservation["deposits"], issuance["deposits"])
+                self.assertEqual(issuance["issued"], conservation["deposits"])
+                # The issuance terms are a *partition* of the deposits.
+                self.assertEqual(
+                    issuance["promoted"]
+                    + issuance["resident_unpromoted"]
+                    + issuance["drained_unpromoted"]
+                    + issuance["evicted"],
+                    conservation["deposits"],
+                )
+                # The conservation terms are the three cohort fates.
+                self.assertEqual(
+                    conservation["resident"]
+                    + conservation["drained"]
+                    + conservation["evicted"],
+                    conservation["deposits"],
+                )
+                self.assertEqual(
+                    conservation["evicted"],
+                    pool.mass_balance()["evicted"],
+                )
+
+    def test_promoted_then_evicted_cohort_is_not_double_counted(self) -> None:
+        pool = DebrisPool(capacity=2)
+        pool.deposit(
+            _debris("d1", (_cohort("a", "motif"), _cohort("b", "motif"))),
+            Provenance(19, 1),
+            1,
+        )
+        pool.promote("a", 2)
+        pool.deposit(
+            _debris("d2", (_cohort("c", "motif"), _cohort("d", "motif"))),
+            Provenance(19, 2),
+            2,
+        )
+        issuance = pool.issuance_account()
+        # "a" was promoted and then evicted: counted once, under `promoted`.
+        self.assertEqual(issuance["promoted"], 1)
+        self.assertEqual(issuance["evicted_promoted"], 1)
+        self.assertEqual(issuance["evicted"], 1)
+        self.assertEqual(issuance["resident_unpromoted"], 2)
+        self.assertEqual(issuance["issued"], 4)
+        self.assertTrue(issuance["holds"])
+        # Taking `_evicted` whole (`_ceiling_evicted` is a subset of it, not
+        # an extra term) would count "a" twice and miss the deposits by one.
+        self.assertEqual(
+            issuance["promoted"]
+            + issuance["resident_unpromoted"]
+            + issuance["drained_unpromoted"]
+            + issuance["evicted"]
+            + issuance["evicted_promoted"],
+            issuance["deposits"] + 1,
+        )
+
+    def test_naive_ruling_formula_overcounts_by_exactly_the_reads(self) -> None:
+        """The double count the user ratified as our correction.
+
+        Ruling (F) proposed ``in = out_reads + drained + delta_resident``.
+        Reads are non-destructive, so every cohort a read surfaces is added
+        to the outflow while never leaving the pool: the naive right-hand
+        side exceeds the true inflow by exactly the mass the reads handed
+        out.  Neither named account makes that mistake.
+        """
+        pool = DebrisPool(capacity=8)
+        pool.deposit(
+            _debris(
+                "d1",
+                (
+                    _cohort("a", "motif"),
+                    _cohort("b", "motif"),
+                    _cohort("c", "scaffold"),
+                ),
+            ),
+            Provenance(19, 1),
+            1,
+        )
+        start_resident = 0  # the window opens on an empty pool
+        read_surfaces = sum(
+            len(pool.read(kind)) for kind in ("motif", "motif", "scaffold")
+        )
+        self.assertEqual(read_surfaces, 5)  # two reads surface two each
+        self.assertEqual(
+            sum(pool.mass_balance()["reads_by_kind"].values()), 3
+        )
+        pool.drain(("c",), 2)
+        balance = pool.mass_balance()
+        delta_resident = balance["resident"] - start_resident
+        naive = read_surfaces + balance["drained"] + delta_resident
+        self.assertEqual(naive - balance["deposits"], read_surfaces)
+        self.assertEqual(naive, 8)  # 3 deposits + 5 double-counted
+        # The conservation account excludes reads by construction ...
+        self.assertTrue(balance["conservation_account"]["holds"])
+        self.assertEqual(balance["conservation_account"]["deposits"], 3)
+        self.assertNotIn("reads", balance["conservation_account"]["identity"])
+        # ... and the issuance account closes without a reads term too.
+        self.assertTrue(balance["issuance_account"]["holds"])
+        self.assertEqual(balance["issuance_account"]["issued"], 3)
+        self.assertNotIn("read", balance["issuance_account"]["formula"])
+
+    def test_reads_are_not_mass_so_they_cannot_break_either_account(self) -> None:
+        pool = DebrisPool(capacity=4)
+        pool.deposit(
+            _debris(
+                "d1",
+                (_cohort("r", "residual"), _cohort("m", "motif")),
+            ),
+            Provenance(19, 1),
+            1,
+        )
+        before = (
+            pool.conservation_account(),
+            pool.issuance_account(),
+            len(pool),
+        )
+        for _ in range(3):
+            for kind in COHORT_KINDS:
+                pool.read(kind)
+        self.assertEqual(
+            (pool.conservation_account(), pool.issuance_account(), len(pool)),
+            before,
+        )
 
 
 class TestExecutorIntegration(unittest.TestCase):

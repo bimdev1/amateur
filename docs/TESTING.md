@@ -116,7 +116,7 @@ so the A2 ordering rule is untouched — design §15.11 / contract §1.1).
 | 10 | Resolved Trajectory (P3→P1) | `LatentRolloutBody` | **derived** | synthetic |
 | 11 | Active Context (D1→P3) | `None` | placeholder (D1 frozen) | placeholder |
 | 12 | State Deltas & Surprise (P3→P4) | `StateDeltaBody` | **derived** | synthetic |
-| 13 | Board Ops (P4→D1) | `BoardOpBody` \| `None` | placeholder (#13 blocked) | placeholder |
+| 13 | Board Ops (P4→D1) | `BoardOpBody` \| `None` | **not yet derived** — transport only: `BoardStore` and `Regulator` exist and are tested, but `DryRun` owns no D1 instance, `#14` is hardcoded `None`, `#13` is in `PLACEHOLDER_FLOWS`, and `_absorb_writes` has no `#13` handler (round-12a audit §2.4) | placeholder |
 | 14 | Slot State (D1→P4) | `SlotStateBody` \| `None` | placeholder (D1 frozen) | placeholder |
 | 15 | Evicted Clusters (D1→P5) | `None` | placeholder (D1 frozen) | placeholder |
 | 16 | Cost vs. Error (P3→P5) | `CostErrorBody` \| `None` | **derived** (new: `error = #12.surprise`, `cost = ‖#12.delta‖₂`) | synthetic |
@@ -136,7 +136,14 @@ Summary (physics mode): **10/16 non-read flows derived**
 ({3, 6, 10, 12, 16, 17, 18, 19, 22, 24}), **6/16 placeholders**
 ({1, 2, 4, 5, 9, 13}), and **11/11 store reads executor-derived**
 ({7, 8, 11, 14, 15, 20, 21, 23, 25, 26, 27}).  D1 reads stay `None`
-because #13 is blocked and D1 is frozen.  The default synthetic dry run
+because no `BoardStore` is owned by the executor.  The round-12a audit
+reclassifies the six placeholders: **#1 is the only true node dependency**
+(E2 has no implementation); `#2/#4/#5/#9` are body-type/transport work with
+live producers; `#13` is pure wiring between two already-tested nodes
+(`BoardStore`, `Regulator`) — the old "D1 frozen, so #13 blocked" comment is
+circular (`docs/round12a-audit.md` §3).  No placeholder was derived in 12a:
+every derivation needs a body type, and body types are a schema change,
+which 12a forbids.  The default synthetic dry run
 keeps its historical plumbing behaviour (every non-read flow `None` except
 the #18/#19/#22/#24 no-op/rotating bodies).
 
@@ -192,10 +199,13 @@ How each user-supplied master invariant is currently verified:
 | INV-ATOMIC (round 8; round 9a) | tested (fail-closed) | record+patch atomicity on every path: capacity, byte ceiling, organ-driven evict; round 9a refuses `patch="full"` at the capacity gate **before any fit/overlay**, and the outer byte-ceiling path is exercised with a synthetic oversized patch (asserted in the derivation pass before any arrival, no state change); `MatBoard` guard rails (validate-before-pop revalidation, duplicate-birth rejection, exactly-one `evict_record`); `test_payloads.TestMatBoardGuardRails`/`TestMatBoardPatches`, `test_physics_run.TestFullPatchModeFailsClosed` | enduring (Python); Lean bounds records only |
 | INV-CAPACITY (round 9a) | derivation + tests (arithmetic; not proved in Lean) | `K ≤ γ·N·D` with γ=5.0, N = real evidence transitions used, D=64 (`amateur/physics/capacity.py`); last-layer low-rank patch `K(r)=192r+64`, `r_max=min(floor((γND−D)/192),64)`, `nbytes=4K`; N=4 → rank 6 / K=1,216 / 4,864 B; N=16 → rank 26 / K=5,056 / 20,224 B; N≥64 → rank 64 / K=12,352 / 49,408 B; dense 34,240 and full 210,920 refused at every N; outer byte ceilings are storage bounds only; `test_physics_capacity` (11) | physics epoch; γ=5.0 is pre-registered design slack, not measured; not proved in Lean |
 | INV-VALIDATION (round 9a) | tested (state-based; no-peek asserted) | pre-adoption proposal at frame 16; paired candidate-vs-base validation on held-out ticks 17–18 of the same stream; birth only if `candidate_mean < base_mean` strictly, decision at 18; rejection record reason `interference` with both means; no birth/activation on reject; `test_physics_organ.TestPreAdoptionValidation`, `test_physics_run.TestPreAdoptionValidation` | physics epoch; `validation_window=2` == `stale_patience` (documented); one candidate at a time; trigger-gating (9b) not in scope; **scope: executor proposal path only** — the organ's legacy ratchet birth path (`_decide_tick → _adopt_or_revalidate → _fit_overlay → birth`) remains unvalidated, and the 0.8226 bank ratio is a fit-quality diagnostic, not validation evidence (design §15.3, notes 40–41) |
-| INV-ADAPTATION / ADMISSION | **superseded for round 11 by design §15.11**; the 9a numbers are historical | 9a (live-overlay) gates — ADAPTATION 0.9665724706513396 PASS, ADMISSION 1.0461437156029878 FAIL — were measured on the old 26-flow topology and are retained as history, never re-asserted. Round 11 re-registers them on the new evidence: **ADAPTATION** = mean shadow adapted/base over shadow-scored ∩ flipped rows < 1.0; **ADMISSION** = count of promoted candidates with residence ratio ≥ 1.0 == 0. Definitions in design §15.11 (written before measurement); pinned in `test_physics_run` | physics epoch; admission *policy* still deferred |
+| INV-ADAPTATION / ADMISSION | **current form: round 12a** (ratio-of-means, both tick sets, both numbers); 9a/11 numbers historical | ADAPTATION = `Σ adapted / Σ base` over `phase == "flipped"` ∧ shadow-scored **out-of-sample** rows < 1.0 (the gate); `secondary_mean_of_ratios` and `with_in_sample` (birth sample added back) are reported, labelled, never gated; the three tick sets (adaptation / with-in-sample / residence) are emitted explicitly. ADMISSION = count of promoted candidates with residence ratio ≥ 1.0 == 0. Round-11 primary under this convention: 0.9992248015938371 (n=8, the same set as the residence curve — declared), secondary 0.9555247158775397; registered 12a trace: 1.013377976345238 FAIL. Pinned in `test_physics_run` | physics epoch; admission *policy* still deferred |
+| INV-MDL-GAIN (round 12a) | derivation + tests (arithmetic); **user-ratified constant** | `κ·H·dbar > 32·K`, strict: `κ = 934.7982054975386` bits per (latent²·tick) = `d/(2σ²ln2)`, `d=64`, `σ² = 0.04938631785656374` (phase-3 in-distribution mean surprise — the model's own code variance), `H=20` = POST_FLIP, cost `32K` (uniform 32-bit convention). `dbar` = mean per-tick `base−adapted` over **out-of-sample** evidence; `in_sample` is never read. Refusal classes `harmful` (`dbar<=0`) vs `uneconomic`. Antecedent: the round-11 t27 candidate (K=5,056) buys 3.547 bits against 161,792 → refused (`uneconomic`, 4.56e4× short). `tests/test_physics_organ` floor arithmetic + `test_physics_nulls`; `docs/round12a-prereg.md` §3 (ratified 2026-11-20 before the runs) | physics epoch; the exchange constant is a declared modelling choice, not a theorem |
+| INV-TRIGGER-EVIDENCE (round 12a) | tested (AST + measured) | `N_MIN = 2` replaces `tick >= fit_window`: the birth trigger is `tick >= N_MIN` ∧ `surprise > spike_threshold`, and the fit window / capacity bound use the actual `N = min(fit_window, tick)`. `N_MIN=2` = one transition to fit + one out-of-sample transition to test (rank-1 is admissible at `N=2` under `K <= γND`). Measured: seed 7 births t12 (K=3,712), seed 0 t9 (K=2,752). `test_physics_run` (AST assertion: `_should_birth` names `N_MIN`, not `fit_window`) | physics epoch; the old 16 was arbitrary |
+| INV-MOTIF-DERIVED (round 12a) | derivation (exact DP) + tests | `MOTIF_MIN_COUNT=2`, `MOTIF_MIN_PERSISTENCE=2` derived by criterion M: the null (q99 = 1 %/tick) false-declaration probability over the 36-tick registered run must stay ≤ 1 %. Exact DP over `(count, streak, elapsed)`; pre-registered (looser intervening reading) `P_false(2,2)=0.978403 %`; implemented distance rule `0.671758 %` (stricter; the pre-registered number stands as the conservative bound — `docs/round12a-prereg.md` §5 amendment note). Unchanged from the bank corpus? No: the bank pair (4,10) is withdrawn for the single-stream regime; the derivation is from the regime's null ingest process, not from a seed's observed support pattern. `tests/test_physics_organ` pins both DP readings and the selection | physics epoch; the derivation is statistical, not a measurement of adaptation |
 | INV-RESET (round 8; round 9a) | tested | `PhysicsOrgan.reset_p6_state()` clears decisions/pending/cooldown/gate evidence/overlay table/fit history; `PhysicsRun.reset()` calls it; two consecutive `acceptance()` runs are identical (round 9a: proposal 16, birth 18, stale 31, evict 35, all-active 1.0461437156029878, flip-only 0.9665724706513396, 11 D4 sediments, clean end state); `test_physics_run.TestResetRepeatability` | enduring (harness contract); needed for the registered trace to be repeatable |
 | INV-ZERO-CONF (round 8; round 11) | tested by serialized-bytes equality + identity B | #22 is a **derived** gate output (Q4-A), now derived from the #23 residence evidence: `qualified` survivor → `BiasPrimitive(confidence=clamp(1-ratio,0,1), candidate_lineage=candidate_id)`; anything else → the zero-confidence sentinel, absorbed as a consumed no-op with no promotion and no D4 change. **D4 criterion adjudicated (2026-11-20): the retained-contents reading is correct and met; the round-8 "no writes at all" reading is rejected** (design §15.10) | physics epoch; the passing branch is real, not injected; D4 reading closed |
-| INV-MASS (round 11) | tested; asserted every tick | `DebrisPool.mass_balance()`: `deposits == resident + drained + evicted` at cohort level, plus a separate issuance account (promoted / resident_unpromoted / drained_unpromoted) and `reads_by_kind`; random-sequence test in `test_payloads`, per-tick assertion in `test_dryrun`; measured 1000-tick synthetic run `4000 = 32 + 999 + 2969`, ceiling evictions 0. **Flagged:** ruling (F)'s `in = out reads + drained + Δresident` is not a conservation law while reads are non-destructive, so the conservation-correct identity is the one asserted and reads are accounted separately | tested-not-proven (Python) |
+| INV-MASS (round 11; named in 12a) | tested; asserted every tick | Two **distinctly named** accounts: `conservation_account()` `deposits = resident + drained + evicted` (canonical; reads are not a term) and `issuance_account()` `deposits = promoted + resident_unpromoted + drained_unpromoted + evicted`, where the eviction term is *unpromoted* evictions and the slack is reported as `evicted_promoted` (a promoted-then-evicted cohort must not be counted twice). `mass_balance()` composes both and keeps the round-11 flat keys. Random-sequence tests in `test_payloads`; per-tick assertion in `test_dryrun`; measured 1000-tick synthetic `4000 = 32 + 999 + 2969`; naive ruling form over-counts by exactly the read surfaces (pinned). **Flagged (12a audit):** `DebrisPool.promote` has no executor caller, so the issuance `promoted` term is structurally 0 in every run — the D3 promotion path is unwired; the nursery (#22) promotion is the live one | tested-not-proven (Python) |
 | INV-PROMOTE-ONCE (round 11) | tested (Python) + proved for the candidate index | D3: `DebrisPool.promote` refuses a second promotion of the same cohort. D2: Lean `nursery_promote_resident` / `nursery_promote_once` / `nursery_promote_twice` (an id promoted out is never re-admitted, so it cannot be promoted twice), and `nursery_birth` refuses any id ever seen | enduring (statement) |
 | INV-LINEAGE (round 11) | tested, physics mode only, fail-closed | #24 `motif_lineage` must equal this tick's consumed #21 motif; #22 positive sediment requires `candidate_lineage` = the #23 survivor consumed this tick, still resident, and **qualified**; the candidate is promoted before the sediment. A violation is an `AssertionError` (wiring defect), never a charge. The #23 survivor read carries `qualified` as a flag, so a harmful candidate is surfaced and refused rather than pre-filtered away | physics epoch |
 | INV-NURSERY (round 11) | typed + tested + proved (index law) | D2 candidate index: `NURSERY_CAPACITY=4` FIFO birth, ids never resurrected, `residence_ticks = shadow observations`, `RESIDENCE_N=4` pre-registered, candidate patch counted in D2 bytes (`patch_bytes` covers both indices), promotion/eviction remove record+patch atomically; Lean nursery block proves boundedness, birth membership, one-tick residence, distinctness and promotion-once | enduring (law); the constants are design pins |
@@ -544,7 +554,7 @@ Measured on the corrected 27-flow graph, after the Round-11 implementation:
 | Check | Result |
 | --- | --- |
 | suite | **431 tests, OK, 0 skipped, 0 expected failures** (50–63 s) |
-| `python3 tools/gen_lean.py \| diff - formal/DryRun.lean -` | empty (byte-identical) |
+| `python3 tools/gen_lean.py \| diff - formal/DryRun.lean` | empty (byte-identical) |
 | `lean formal/DryRun.lean` | exit 0, **76 theorems**, zero `sorry`, zero `axiom`, 2.3–3.4 s |
 | op table vs Round-10 HEAD | **byte-identical** (no mailbox theorem restated) |
 | 1000-tick canonical dry run | liveness 27/27, accepted 27,000, refused 0, sinks `{2:1000, 4:1000, 5:1000}`, misses `{10:1, 17:1}`, `max_depth ≤ 1`, in transit `{10:1, 17:1}` |
@@ -563,3 +573,34 @@ are in `docs/round11-record.md` §3–§4. The pre-registered gate text is
 and fuzz numbers) remain the record of that round; the 27-flow op table is
 unchanged, so the mailbox profile above reproduces them exactly, and they
 are restated here only as a reproduction check, not as new evidence.
+
+## Round 12a closeout (conventions, gain floor, controls)
+
+Measured on this round's tree; full record `docs/round12a-record.md`.
+Pre-registration `docs/round12a-prereg.md` (constants frozen and, for the
+MDL exchange, user-ratified **before** the runs).
+
+| Check | Result |
+| --- | --- |
+| suite | **477 tests, OK** (129 s), 0 skipped, 0 expected failures |
+| `python3 tools/gen_lean.py \| diff - formal/DryRun.lean` | empty (byte-identical); Lean untouched by 12a |
+| ADAPTATION convention | ratio-of-means primary; mean-of-ratios and with-in-sample reported and labelled; three tick sets emitted |
+| Round-11 ADAPTATION recomputed | primary **0.9992248015938371** (n=8; adaptation set == residence set, declared), secondary 0.955525, with-in 0.899061 |
+| seed 7 registered (birth t12, K=3,712) | ADAPTATION primary **1.013378 FAIL** (n=15); with-in 0.892135; residence ratio-of-means 1.060769; **0 promotions even pre-floor**; ADMISSION 0/0 vacuous |
+| gain floor (κ=934.798, H=20, ratified) | refuses every candidate: Round-11 t27 by **4.56e4×**, seed-0 t14 by **524×**, organ probe by **2,154×** |
+| retroactive falsifier | Round-11 t27 refused: gain 3.547 bits vs 161,792 bits (`uneconomic`) |
+| trigger (N_MIN=2) | seed 7 births **t12** (was t19 — the reversal of the Round-11 verdict is the round's primary finding); seed 0 births **t9**, K=2,752 |
+| motif thresholds (derived 2/2, criterion M) | seed 7: 0 motif cohorts; seed 0: live half fires (2 motif ids, `ovr-02`/`ovr-03`, stale/evict) |
+| null suite (seed 7, pre-registered) | 0 promotions for zero/random/shuffled with **and** without the floor; zero exactly neutral (ratio 1.0, dbar 0.0); `no_flip` vacuous (no spike) |
+| post-hoc seed-0 null probe | real 0.983203 **promoted pre-floor**; zero 1.0, random 1.0456, shuffled 1.1263 never qualified — stop condition did not fire (post-hoc, not a gate) |
+| housekeeping | two named mass accounts; dead `#21` `drift` payload field deleted; coverage audit `docs/round12a-audit.md` (#1 blocked, #2/#4/#5/#9 not-yet-derived, #13 transport-only) |
+
+**Open convention issue recorded, not resolved.** ADAPTATION's tick set
+depends on the floor it measures (a refused candidate keeps being scored):
+seed 0 is n=18 / 1.0321 with the floor on and n=5 / 0.9832 ablated. For 12b
+the metric needs a fixed evidence window or a per-candidate form.
+
+**Flags.** `DebrisPool.promote` has no executor caller (`INV-PROMOTE-ONCE`'s
+D3 half is tested but never exercised); `INV-ADAPTATION`/`ADMISSION` numbers
+above are trace-level and not invariant to the gate. Both are in the 12b
+input list.

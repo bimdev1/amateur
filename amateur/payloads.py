@@ -1255,9 +1255,12 @@ class DebrisPool:
     provenance.  Reads are **non-destructive** and per-kind; #27 is the one
     destructive drain (``drain``).  Capacity overflow evicts FIFO; byte
     overflow raises `DebrisCeilingExceeded` unless the caller allows the
-    recorded eviction backstop.  The asserted mass identity is
-    ``deposits == resident + drained + evicted`` (contract §0/§1.8); the
-    ruling's issuance account is reported separately as ``issuance``.
+    recorded eviction backstop.  Two accounts are kept, both named and never
+    substituted for each other (prereg §7): :meth:`conservation_account`
+    asserts ``deposits == resident + drained + evicted`` (contract §0/§1.8)
+    with reads explicitly excluded, and :meth:`issuance_account` reports the
+    ruling's intended cohort-issuance partition.  ``mass_balance()`` carries
+    both plus the Round-11 flat keys ``run.py`` reads.
     """
 
     def __init__(
@@ -1439,36 +1442,127 @@ class DebrisPool:
 
     # ------------------------------------------------------------- accounting
     def _assert_balance(self) -> None:
-        assert self._deposits == len(self._entries) + self._drained + self._evicted, (
+        """The conservation identity, from the records as well as the counters.
+
+        The counters (``_deposits/_drained/_evicted``) and the record lists
+        (``_entries/drains/evictions``) must agree, otherwise a derived
+        account would disagree with the asserted one.
+        """
+        resident = len(self._entries)
+        drained = len(self.drains)
+        evicted = len(self.evictions)
+        assert (self._drained, self._evicted) == (drained, evicted), (
+            "D3 record lists out of step with their counters: "
+            f"drained counter={self._drained} records={drained}, "
+            f"evicted counter={self._evicted} records={evicted}"
+        )
+        assert self._deposits == resident + drained + evicted, (
             "D3 mass balance broken: "
-            f"deposits={self._deposits}, resident={len(self._entries)}, "
-            f"drained={self._drained}, evicted={self._evicted}"
+            f"deposits={self._deposits}, resident={resident}, "
+            f"drained={drained}, evicted={evicted}"
         )
 
-    def mass_balance(self) -> dict:
-        """Conservation identity plus the separate ruling-F issuance account."""
-        self._assert_balance()
-        promoted = len(self._promoted)
-        issuance = {
-            "promoted": promoted,
-            "resident_unpromoted": sum(
-                cohort.cohort_id not in self._promoted
-                for cohort in self._entries
-            ),
-            "drained_unpromoted": sum(
-                cohort.cohort_id not in self._promoted
-                for cohort in self.drains
-            ),
+    def conservation_account(self) -> dict:
+        """Canonical conservation identity: `deposits = resident + drained + evicted`.
+
+        Reads are **not** a term.  A non-destructive read (#20/#21/#26/#27 all
+        read the same cohort store without removing anything) can never sit on
+        the outflow side of a conservation law without double counting; the
+        ruling-F form `in = out_reads + drained + delta_resident` therefore
+        over-counts by exactly the mass the reads handed out.  The terms below
+        are the three states a deposited cohort can be in, each counted once.
+        """
+        deposits = self._deposits
+        resident = len(self._entries)
+        drained = len(self.drains)
+        evicted = len(self.evictions)
+        return {
+            "deposits": deposits,
+            "resident": resident,
+            "drained": drained,
+            "evicted": evicted,
+            "ceiling_evicted": self._ceiling_evicted,
+            "identity": "deposits = resident + drained + evicted",
+            "holds": deposits == resident + drained + evicted,
         }
+
+    def issuance_account(self) -> dict:
+        """Ruling-F issuance account: every deposit issued to exactly one fate.
+
+        The four terms **partition** ``deposits``, so the account closes:
+
+        * ``promoted`` -- cohorts whose id was ever promoted for a consumer
+          (INV-PROMOTE-ONCE makes this monotone: a cohort is counted once
+          here whatever its later fate, so it is not also counted below);
+        * ``resident_unpromoted`` -- still resident, not yet promoted;
+        * ``drained_unpromoted`` -- removed by the destructive #27 drain
+          before promotion;
+        * ``evicted`` -- removed by capacity FIFO or the byte-ceiling backstop
+          before promotion.
+
+        The ``evicted`` term is deliberately the *unpromoted* evictions.
+        ``_evicted`` counts **every** eviction and ``_ceiling_evicted`` is a
+        subset of it (``_record_evicted`` increments both), not an additional
+        term; taking ``_evicted`` whole would count a promoted-then-evicted
+        cohort twice -- once under ``promoted``, once under ``evicted``.  That
+        slack is reported as ``evicted_promoted`` instead of hidden.
+
+        This is the ruling's intended *cohort issuance* account (which cohort
+        was issued to which reader, and which was promoted), not a
+        conservation law; the conservation identity is
+        :meth:`conservation_account`.
+        """
+        promoted = len(self._promoted)
+        resident_unpromoted = sum(
+            cohort.cohort_id not in self._promoted for cohort in self._entries
+        )
+        drained_unpromoted = sum(
+            cohort.cohort_id not in self._promoted for cohort in self.drains
+        )
+        evicted_promoted = sum(
+            cohort.cohort_id in self._promoted for cohort in self.evictions
+        )
+        evicted = len(self.evictions) - evicted_promoted
+        issued = promoted + resident_unpromoted + drained_unpromoted + evicted
         return {
             "deposits": self._deposits,
-            "resident": len(self._entries),
-            "drained": self._drained,
-            "evicted": self._evicted,
-            "ceiling_evicted": self._ceiling_evicted,
             "promoted": promoted,
+            "resident_unpromoted": resident_unpromoted,
+            "drained_unpromoted": drained_unpromoted,
+            "evicted": evicted,
+            "evicted_promoted": evicted_promoted,
+            "issued": issued,
+            "formula": (
+                "deposits = promoted + resident_unpromoted "
+                "+ drained_unpromoted + evicted"
+            ),
+            "holds": issued == self._deposits,
+        }
+
+    def mass_balance(self) -> dict:
+        """Both named accounts; the flat keys are Round-11 compatibility.
+
+        ``run.py`` stores this dict on every tick, so the flat
+        ``deposits/resident/drained/evicted/ceiling_evicted/promoted/
+        reads_by_kind`` keys stay exactly as they were; the two accounts are
+        added beside them (``conservation_account``, ``issuance_account``).
+        ``issuance`` is the Round-11 short name and now carries the full
+        issuance account.  Neither account is ever substituted for the other.
+        """
+        self._assert_balance()
+        conservation = self.conservation_account()
+        issuance = self.issuance_account()
+        return {
+            "deposits": conservation["deposits"],
+            "resident": conservation["resident"],
+            "drained": conservation["drained"],
+            "evicted": conservation["evicted"],
+            "ceiling_evicted": conservation["ceiling_evicted"],
+            "promoted": issuance["promoted"],
             "reads_by_kind": dict(self._reads_by_kind),
             "issuance": issuance,
+            "conservation_account": conservation,
+            "issuance_account": issuance,
         }
 
     def over_ceiling(self) -> bool:
