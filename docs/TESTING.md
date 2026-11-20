@@ -72,9 +72,9 @@ reduces to a per-flow recurrence. `step_flow(fid, box)` is that pure step;
 the Lean file is generated from the same table and proves its long-run
 shape for *all* ticks, not just sampled ones:
 
-| Theorem | Statement |
-| --- | --- |
-| `boxes_bounded` | every mailbox depth <= 1 at every tick |
+| Theorem | Statement | Cadence |
+| --- | --- | --- |
+| `boxes_bounded` | every mailbox depth <= 1 at every tick | under the dry-run op table (plumbing cadence) |
 | `boxes_master`  | for `t >= 1`, depth profile is exactly `{10: 1, 17: 1}`, zero elsewhere |
 | `misses_master` | cumulative misses are exactly one on each cycle, frozen after tick 1 |
 | `sunk_master`   | `sIter t i = t` for the sinks (#2, #4, #5), 0 elsewhere |
@@ -82,11 +82,13 @@ shape for *all* ticks, not just sampled ones:
 | `emit_liveness` | per-op table: every flow's word emits exactly once (fids 1..26) |
 | `consume_sink_split` | per-op table: every flow either consumes once or is a sink (fids 1..26) |
 | `balance_at_master` | at the master profile, box' + sunk' + consumes = fbox i + 1 per flow |
-| `geometry_write_channel_purity` | the payload kinds excluded from geometry (trajectory, delta, context) are absent from *both* D2 and D4 channel allow-lists |
-| `geometry_writes_anchored` | D4 writes are exactly flow #22 and D2 writes exactly {#23, #24}, all ratchet (6.0) consume ops |
-| `mat_operational` | closed form: `matRun (t+3) = replicate 2 (t+2) ++ replicate 2 (t+3)` |
-| `mat_fresh` | INV-NO-OSSIFY: every resident epoch in `matRun t` (t ≥ 1) equals *t* or *t−1* |
-| `mat_bounded` | `(matRun t).length ≤ 4` at every tick |
+| `geometry_write_channel_purity` | the payload kinds excluded from geometry (trajectory, delta, context) are absent from *both* D2 and D4 channel allow-lists | type-level, cadence-free (enduring) |
+| `geometry_writes_anchored` | D4 writes are exactly flow #22 and D2 writes exactly {#23, #24}, all ratchet (6.0) consume ops | topology-level, cadence-free (enduring) |
+| `matTick_length` | one matTick step preserves the capacity bound (given a compliant board) | step law, cadence-free (enduring) |
+| `mat_operational_policy` | closed form `run (t+3) = replicate 2 (t+2) ++ replicate 2 (t+3)` for **every** stream obeying the update law (`run 0 = [0]`, one matTick per tick) | policy-relative, schedule explicit |
+| `mat_fresh_policy` | INV-NO-OSSIFY for every stream obeying the update law: every resident epoch equals *t* or *t−1* | policy-relative, schedule explicit |
+| `mat_bounded_policy` | capacity bound for every stream obeying the update law | policy-relative, schedule explicit |
+| `mat_operational` / `mat_fresh` / `mat_bounded` | the same three statements, specialized to the dry-run minter (`matRun`) | corollaries of the policy theorems; the minter provably satisfies the law |
 
 Proof architecture: per-flow *warm* facts (one tick from zero) and *step*
 facts (one tick from the master profile) — the concrete fid arms discharge
@@ -94,24 +96,48 @@ by kernel `rfl`, the case split over fids is one 27-arm match plus a tail
 arm — then short tick-inductions plus a fold induction over op words. No
 axioms, no `sorry`; core Lean 4 only.
 
+### Cadence audit: universal vs policy-relative (user-adjudicated)
+
+A proof about the minter is not a proof about the board. Classification:
+
+- **Policy-relative with the schedule lifted as an explicit theorem
+  hypothesis:** `mat_operational_policy`, `mat_fresh_policy`,
+  `mat_bounded_policy` quantify over *every* epoch stream obeying the mat
+  update law (`run 0 = [0]`, `run (k+1) = matTick (run k) (k+1)`). The
+  dry-run minter (`matRun`) is one such stream, proven — so `mat_operational`,
+  `mat_fresh`, `mat_bounded` are corollaries. A physics-epoch schedule is a
+  different law, never a silent assumption.
+- **Schedule-pinned (dry-run cadence, plumbing-only):** the mailbox
+  recurrence theorems (`boxes_master`, `misses_master`, `sunk_master`,
+  `emit_liveness`, `consume_sink_split`, `balance_at_master`) quantify
+  over the generated op table, which is the dry-run's per-tick schedule
+  pinned to the ledger by lockstep tests. When the sedimentation flows
+  (#22/#23/#24) become trigger-gated, these are re-derived against the
+  new table — the generator makes that a regeneration, not a rewrite.
+- **Cadence-free (enduring):** `geometry_write_channel_purity`,
+  `geometry_writes_anchored`, `matTick_length`, and the conservation
+  shape per op word (`applyOp_step`, `fold_balance`, `flow_balance`).
+
 ## Master invariant matrix (INV-*)
 
 How each user-supplied master invariant is currently verified:
 
-| INV-id | Status | Where |
-| --- | --- | --- |
-| INV-BOUNDS | proven | Lean `boxes_bounded` |
-| INV-LIVENESS | proven + empirical + structural | Lean `emit_liveness`; `test_invariants.TestLiveness` |
-| INV-CYCLE-DELAY | proven | Lean `boxes_master` |
-| INV-CONSERVE | proven per-flow + empirical system-wide | Lean `flow_balance`, `balance_at_master`; `test_accounting` identity |
-| INV-EXHAUST | proven | Lean `sunk_master` |
-| INV-CAUSAL | structural | `test_invariants.TestCausal` |
-| INV-GEOMETRY | adjudicated two-tier reading: structural (writer sets) + proven (type-system purity) | `test_invariants.TestGeometry`; Lean `geometry_write_channel_purity`, `geometry_writes_anchored`; D2/D4 are the parametric geometry written only by 6.0, D1/D3 operational by design |
-| INV-NO-OSSIFY | typed + proven + empirical | Lean `mat_fresh`, `mat_bounded`; `test_payloads` lifecycle/integration |
-| INV-EMPTINESS | typed by construction + proven | `MatOverlay`/`BiasPrimitive` exact-type whitelist; Lean `geometry_write_channel_purity`; `test_payloads` trajectory-rejection |
-| INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` |
-| INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` |
-| INV-CENSUS | resolved (raw membership, adjudicated) | `test_recurrence` census: \|Cycles(D1)\|=7 (entangled hub), \|Cycles(D2)\|=4, \|Cycles(D3)\|=4, \|Cycles(D4)\|=3 with zero 2-/3-hop loops — D4's structural insulation |
+| INV-id | Status | Where | Epoch |
+| --- | --- | --- | --- |
+| INV-BOUNDS | cold-start proven | Lean `boxes_bounded`; adversarial robustness = round-7 scope | enduring |
+| INV-LIVENESS | proven + empirical + structural **in its current per-flow, per-tick form** | Lean `emit_liveness`; `test_invariants.TestLiveness` | plumbing-only; enduring form: liveness scoped to the always-on spine, #22/#23/#24 trigger-gated in the physics epoch |
+| INV-CYCLE-DELAY | proven | Lean `boxes_master` | plumbing-only (the depth profile is schedule-relative; the two delayed cycles themselves are design) |
+| INV-CONSERVE | proven per-flow + empirical system-wide | Lean `flow_balance`, `balance_at_master`; `test_accounting` identity | enduring (round-7 overflow semantics must preserve it) |
+| INV-EXHAUST | proven | Lean `sunk_master` | plumbing-only (linear growth = per-tick schedule) |
+| INV-CAUSAL | structural | `test_invariants.TestCausal` | enduring |
+| INV-GEOMETRY | adjudicated two-tier reading: structural (writer sets) + proven (type-system purity) | `test_invariants.TestGeometry`; Lean `geometry_write_channel_purity`, `geometry_writes_anchored`; D2/D4 are the parametric geometry written only by 6.0, D1/D3 operational by design | enduring |
+| INV-NO-OSSIFY | typed + proven (schedule explicit) + empirical | Lean `mat_fresh_policy`/`mat_fresh`, `mat_bounded_policy`/`mat_bounded`; `test_payloads` lifecycle/integration | enduring (statement); current proof policy-relative to the mat law, hypothesis explicit |
+| INV-EMPTINESS | typed by construction + proven | `MatOverlay`/`BiasPrimitive` exact-type whitelist; Lean `geometry_write_channel_purity`; `test_payloads` trajectory-rejection | enduring |
+| INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` | enduring |
+| INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` | plumbing-only in current form (inherits LIVENESS's cadence); enduring form follows the spine-scoped liveness |
+| INV-CENSUS | resolved (raw membership, adjudicated) | `test_recurrence` census: \|Cycles(D1)\|=7 (entangled hub), \|Cycles(D2)\|=4, \|Cycles(D3)\|=4, \|Cycles(D4)\|=3 with zero 2-/3-hop loops — D4's structural insulation | enduring (pure topology) |
+| D4 sediment cadence (#22 one per tick), #23 birth cadence | factual in the dry run | `test_payloads` lifecycle | plumbing-only (harness artifact; 6.0 is an interference-checked gate, not a metronome) |
+| #18 edge (3.0 -> 5.0) | RESOLVED, lexicon pinned, falsifier on record | `v0.10-untested.md` disambiguation; `test_design_intent.TestCrystalLexicon` | enduring (closed) |
 
 Lockstep chain (nothing is trusted twice):
 
@@ -152,6 +178,18 @@ Prose-level invariants from the "Emptiness" text and the ABC contracts:
 timescale separation, trajectory-free core, debris discipline, carrier
 semantics, node vocabulary. These bind the *intended* behavior, not just
 the implemented behavior.
+
+## Physics-epoch acceptance gates (pinned now)
+
+- **Payload provenance (deferred by adjudication, gated here):** every
+  payload must carry `(source_fid, tick_born)` and be derived from actual
+  node state — no minting at emit time. The current synthetic contents
+  (`cry-{t}`, rotating confidences) are acceptable only in the dry run.
+- **Overflow semantics (round 7, pending adjudication):** duplicate or
+  adversarial arrivals at a mailbox must be handled under explicit
+  semantics (proposed: reject-with-charge) chosen so INV-CONSERVE survives
+  verbatim, and per-flow step contraction must be proved in Lean under
+  those semantics.
 
 ## What each layer catches that the others cannot
 

@@ -498,50 +498,93 @@ theorem mat_close_2 : matRun 2 = [1, 2, 2] := rfl
 
 /-- The operational run coincides with the two-band closed shape:
 from tick 3 the resident epochs are exactly {{t-1, t-1, t, t}}. -/
-theorem mat_operational : ∀ t : Nat, matRun (t + 3)
-    = List.replicate 2 (t + 2) ++ List.replicate 2 (t + 3) := by
-  intro t
+theorem matTick_length : ∀ (s : List Nat) (t : Nat), s.length ≤ {MAT_CAPACITY} →
+    (matTick s t).length ≤ {MAT_CAPACITY} := by
+  intro s t h
+  cases s with
+  | nil => simp [matTick, revTop]
+  | cons a r =>
+      have hrev : revTop ((a :: r) ++ [t]) t = (r ++ [t]) ++ [t] := rfl
+      simp only [matTick, hrev]
+      have hlen : ((r ++ [t]) ++ [t]).length = r.length + 2 := by simp
+      rw [hlen]
+      have hcons : (a :: r).length = r.length + 1 := rfl
+      by_cases hr : r.length + 2 > {MAT_CAPACITY}
+      · rw [if_pos hr, List.length_drop, hlen]
+        omega
+      · rw [if_neg hr, hlen]
+        omega
+
+/-- Policy-relative form: the schedule is an explicit hypothesis, not a
+silent assumption. These theorems quantify over EVERY resident-epoch
+stream that obeys the mat update law (seed [0], one matTick per tick) —
+they say nothing about arrival streams outside that law. -/
+theorem mat_operational_policy : ∀ (run : Nat → List Nat),
+    run 0 = [0] → (∀ k, run (k + 1) = matTick (run k) (k + 1)) →
+    ∀ t, run (t + 3)
+      = List.replicate 2 (t + 2) ++ List.replicate 2 (t + 3) := by
+  intro run h0 hU t
   induction t with
-  | zero => rfl
+  | zero =>
+      rw [hU 2, hU 1, hU 0, h0]
+      rfl
   | succ k ih =>
-      show matRun (k + 4)
-          = List.replicate 2 (k + 3) ++ List.replicate 2 (k + 4)
-      have hlhs : matRun (k + 4) = matTick (matRun (k + 3)) (k + 4) := rfl
+      have hlhs : run (k + 4) = matTick (run (k + 3)) (k + 4) := hU (k + 3)
       rw [hlhs, ih, rep2]
       simp [matTick, revTop]
 
-/-- INV-NO-OSSIFY: no resident epoch falls more than one tick behind. -/
-theorem mat_fresh : ∀ t : Nat, 1 ≤ t →
-    ∀ e ∈ matRun t, e = t ∨ e + 1 = t := by
-  intro t
+/-- INV-NO-OSSIFY, policy-relative: no resident epoch falls more than
+one tick behind — for every stream obeying the update law. -/
+theorem mat_fresh_policy : ∀ (run : Nat → List Nat),
+    run 0 = [0] → (∀ k, run (k + 1) = matTick (run k) (k + 1)) →
+    ∀ t, 1 ≤ t → ∀ e ∈ run t, e = t ∨ e + 1 = t := by
+  intro run h0 hU t
   match t with
   | 0 => intro h; omega
   | 1 =>
       intro _ e he
-      rw [mat_close_1] at he
+      have h1 : run 1 = [1, 1] := by rw [hU 0, h0]; rfl
+      rw [h1] at he
       simp at he
       omega
   | 2 =>
       intro _ e he
-      rw [mat_close_2] at he
+      have h2 : run 2 = [1, 2, 2] := by rw [hU 1, hU 0, h0]; rfl
+      rw [h2] at he
       simp at he
       omega
   | t + 3 =>
       intro _ e he
-      rw [mat_operational, rep2] at he
+      rw [mat_operational_policy run h0 hU t, rep2] at he
       simp at he
       omega
 
-/-- The mat never exceeds its capacity. -/
-theorem mat_bounded : ∀ t : Nat, (matRun t).length ≤ {MAT_CAPACITY} := by
-  intro t
-  match t with
-  | 0 => simp [matRun]
-  | 1 => simp [mat_close_1]
-  | 2 => simp [mat_close_2]
-  | t + 3 =>
-      rw [mat_operational]
-      simp
+/-- Capacity bound, policy-relative: for every stream obeying the
+update law, the mat never exceeds its capacity. -/
+theorem mat_bounded_policy : ∀ (run : Nat → List Nat),
+    run 0 = [0] → (∀ k, run (k + 1) = matTick (run k) (k + 1)) →
+    ∀ t, (run t).length ≤ {MAT_CAPACITY} := by
+  intro run h0 hU t
+  induction t with
+  | zero => rw [h0]; decide
+  | succ k ih =>
+      rw [hU k]
+      exact matTick_length (run k) (k + 1) ih
+
+/-- The dry-run minter satisfies the law, so the policy theorems
+specialize to it. -/
+theorem mat_operational : ∀ t : Nat, matRun (t + 3)
+    = List.replicate 2 (t + 2) ++ List.replicate 2 (t + 3) :=
+  mat_operational_policy matRun rfl (fun _ => rfl)
+
+/-- INV-NO-OSSIFY for the dry-run minter. -/
+theorem mat_fresh : ∀ t : Nat, 1 ≤ t →
+    ∀ e ∈ matRun t, e = t ∨ e + 1 = t :=
+  mat_fresh_policy matRun rfl (fun _ => rfl)
+
+/-- Capacity bound for the dry-run minter. -/
+theorem mat_bounded : ∀ t : Nat, (matRun t).length ≤ {MAT_CAPACITY} :=
+  mat_bounded_policy matRun rfl (fun _ => rfl)
 """
 
 

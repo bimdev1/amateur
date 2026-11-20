@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import unittest
 from collections import defaultdict
+from pathlib import Path
 
 from amateur import events, ledger
 
@@ -97,6 +98,39 @@ class TestCarrierSemantics(unittest.TestCase):
         self.assertEqual(hash(a), hash(events.Gradients(payload=("k", 1))))
         with self.assertRaises(TypeError):
             hash(events.Gradients(payload={"k": 1}))
+
+
+class TestCrystalLexicon(unittest.TestCase):
+    """The resolved #18 disambiguation, pinned so it cannot silently
+    reopen: candidate / extracted-rule / vetted are three different terms
+    on three different edges, and the ledger wiring matches the lexicon."""
+
+    RESOLVED = "#18, RESOLVED"
+
+    def _doc(self) -> str:
+        path = Path(__file__).resolve().parents[1] / "v0.10-untested.md"
+        return path.read_text()
+
+    def test_resolution_is_on_record(self) -> None:
+        doc = self._doc()
+        self.assertIn(self.RESOLVED, doc)
+        self.assertIn("Lexicon pinned", doc)
+        self.assertIn("Falsifier on record", doc)
+        for term in (
+            "*Emergent Crystal* = candidate (3.0 -> 5.0)",
+            "*Structural Motif* =\n  extracted rule (5.0 -> 6.0)",
+            "*Surviving Crystal* = vetted, ratcheted\n  structure (6.0 -> D2)",
+        ):
+            self.assertIn(term, doc)
+
+    def test_ledger_matches_the_lexicon(self) -> None:
+        flow = {f.fid: f for f in ledger.FLOW_LEDGER}
+        self.assertEqual(flow[18].source, ledger.P3)
+        self.assertEqual(flow[18].target, ledger.P5)
+        self.assertEqual(flow[21].source, ledger.P5)
+        self.assertEqual(flow[21].target, ledger.P6)
+        self.assertEqual(flow[23].source, ledger.P6)
+        self.assertEqual(flow[23].target, ledger.D2)
 
 
 if __name__ == "__main__":

@@ -4,11 +4,19 @@ No physics — every stage consumes its ledger inputs and emits its ledger
 outputs. The geometry channels carry typed payloads (see payloads.py):
 D2 writes (#23, #24) carry epoch-stamped overlays, D4 writes (#22) carry
 bias primitives — INV-EMPTINESS holds by construction. Every other
-payload stays a placeholder until physics. The driving gradient (#1, #3) and the
-geometry echoes (#7, #8, #11, #14, #15, #20, #25, #26) are injected every
-tick; read-consumes expect data (a miss is counted), store absorbs are
-best-effort; the two in-tick cycles (#10 Resolved Trajectory, #17 Collapse
-Mandate) are one-tick-delayed mailboxes.
+payload stays a placeholder until physics. The driving gradient (#1, #3)
+and the geometry echoes (#7, #8, #11, #14, #15, #20, #25, #26) are
+injected every tick; read-consumes expect data (a miss is counted), store
+absorbs are best-effort; the two in-tick cycles (#10 Resolved Trajectory,
+#17 Collapse Mandate) are one-tick-delayed mailboxes.
+
+Cadence honesty: the uniform per-tick emission schedule and the one-#22
+/one-#23-per-tick geometry writes are plumbing, not design — the always-on
+spine's cadence only. In the physics epoch the sedimentation flows
+(#22, #23, #24) become trigger-gated (6.0 is an interference-checked
+gate, not a metronome), so theorems stated against this schedule are
+registry-marked plumbing-only in docs/TESTING.md; the mat theorems carry
+the schedule as an explicit hypothesis (`mat_*_policy`).
 
 Verification: `flow_ops` and `step_flow` define a pure, per-flow
 independent recurrence over mailbox depths; `formal/DryRun.lean` proves

@@ -170,11 +170,33 @@ class TestLeanCompiles(unittest.TestCase):
             "balance_at_master",
             "geometry_write_channel_purity",
             "geometry_writes_anchored",
+            "matTick_length",
+            "mat_operational_policy",
+            "mat_fresh_policy",
+            "mat_bounded_policy",
             "mat_operational",
             "mat_fresh",
             "mat_bounded",
         ):
             self.assertRegex(text, rf"\btheorem {name}\b")
+
+    def test_mat_theorems_carry_explicit_schedule_hypotheses(self) -> None:
+        """Cadence audit: the mat theorems quantify over every stream
+        obeying the update law — the schedule is a stated hypothesis, not
+        a silent assumption baked into the proof."""
+        text = FORMAL.read_text()
+        for name in (
+            "mat_operational_policy",
+            "mat_fresh_policy",
+            "mat_bounded_policy",
+        ):
+            body = text.split(f"theorem {name}", 1)[1].split(":= by", 1)[0]
+            self.assertIn("run 0 = [0]", body)
+            self.assertIn("run (k + 1) = matTick (run k) (k + 1)", body)
+        for name in ("mat_operational", "mat_fresh", "mat_bounded"):
+            self.assertIn(
+                f"{name}_policy matRun rfl (fun _ => rfl)", text
+            )
 
     def test_payload_schema_markers_match_python(self) -> None:
         text = FORMAL.read_text()

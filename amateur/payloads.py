@@ -111,6 +111,12 @@ class MatBoard:
     stale read), then one eviction iff the board exceeds MAT_CAPACITY.
     Seeded with a single epoch-0 overlay so the #25 -> #24 pairing has a
     candidate from tick 1.
+
+    Cadence honesty: the one-birth-per-tick minting schedule is dry-run
+    plumbing; in the physics epoch #23/#24 are trigger-gated. The Lean
+    theorems that consume this policy quantify over every stream obeying
+    the same update law (`mat_*_policy`), so a different schedule is a
+    different law, never a silent assumption.
     """
 
     def __init__(self) -> None:
