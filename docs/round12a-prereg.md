@@ -224,6 +224,17 @@ which upper-bounds the true false rate):
 normal-regime ingest process; it is not fitted to any seed's observed
 support pattern.
 
+**Amendment note (implementation review, before the 12a run outputs; no
+constant or threshold changed).** The table above was computed with the
+looser reading of `MOTIF_STREAK_GAP` ("intervening": a support continues a
+streak iff at most `gap` *missed ticks* lie between, i.e. distance
+`<= gap+1`). The implemented `_Body.absorb` uses the literal distance test
+(`t - last_support <= gap`), which is **stricter**: the implemented
+`P_false(2,2) = 0.6718 %`. The pre-registered `0.978 %` is therefore a
+conservative **upper bound**; criterion M holds under both readings and the
+derived pair is `(2,2)` either way. The pre-registered number stands as the
+reported bound — it is not rewritten to the smaller measured value.
+
 Pre-registered expectations:
 * the registered seed 7 (longest streak 1) still produces **no motif** and
   therefore no live-overlay event — the single-flip trace is unchanged;
