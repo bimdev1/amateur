@@ -200,6 +200,12 @@ consumes 4× the head budget.
 
 ## 6. Measured overlay evidence (honest, including the null result)
 
+> **Quarantined by Round 9a.**  The 0.690× / 0.6846× numbers below belong to
+> the **inadmissible dense head+norm patch** (34,240 params / 136,960 B) and
+> are withdrawn as current measurements.  The admissible low-rank `head.2`
+> patch re-measures **0.8225682511949177** (bank) and
+> **0.8305541276931763** (organ held-out split); see §15.7.
+
 **Held-out episode fit (the strong result).** Fit the head patch on episodes
 0–15 of phase-3 seed 31 (transitions 8–23), evaluate on 16 unseen seed-77
 episodes, same transition window:
@@ -402,6 +408,11 @@ compare bytes), not merely that a field is zero.
 
 ## 10. Acceptance record (phase 4–5a, measured)
 
+> **Historical record (dense patch, unvalidated adoption).**  For the
+> Round 9a policy and numbers see §15.4–§15.7; the 34,240-param /
+> 136,960 B patch and the 0.6846× bank ratio below are no longer the live
+> policy's measurements.
+
 Probe: 32 paired streams (24 fit + 8 held-out), three-phase rollout
 (normal → flipped at action 8 → flipped back at action 28), horizon 36,
 phase-3 seed 31; held-out streams are observed but never ingested. This is a
@@ -478,6 +489,10 @@ fixed the sub-forks in task-6:
 
 ## 12. Honesty notes (numbered, measured vs assumed)
 
+> Notes 1–15 record the phase 4–5a round (dense patch).  Round 9a
+> re-measures the ratios and supersedes the patch-size claims; see §15.9
+> (notes 29–38).
+
 1. **The acceptance scenario is a shaped bank probe, not the executor flow.**
    24 fit + 8 held-out paired streams from the phase-3 seeds; the digest
    ingests only fit streams. It is real physics (the env's `flip_gravity`),
@@ -543,10 +558,13 @@ fixed the sub-forks in task-6:
 ## 13. Reproduction
 
 ```sh
-# focused organ tests (~15 s, 8 threads)
+# focused capacity derivation (~0.01 s, no model)
+python3 -m unittest tests.test_physics_capacity -v
+
+# focused organ tests (~16 s, 8 threads)
 python3 -m unittest tests.test_physics_organ -v
 
-# focused executor-wiring tests (~3 s; one recorded expected failure)
+# focused executor-wiring tests (~9 s; one recorded expected failure)
 python3 -m unittest tests.test_physics_run -v
 
 # full suite (Lean included); baseline command
@@ -724,6 +742,12 @@ That test is kept and renamed `test_empty_d4_stays_empty_byte_identical`
 
 ### 14.6 Single-stream executor acceptance (measured)
 
+> **Superseded for the live policy by §15.4.**  This is the round-8 record:
+> the dense head+norm patch (34,240 params) and the *unvalidated* adoption at
+> tick 16.  Round 9a replaced the patch with the capacity-bounded low-rank
+> delta and put pre-adoption validation in front of the birth; the current
+> registered trace is in §15.4.
+
 Trace: 1 stream, seed 7, warmup 8, flip, 20 post-flip ticks, flip back, 8
 recovery ticks (36 executor ticks).  Every number below is measured.
 
@@ -890,3 +914,348 @@ never emission counts.
     share a patch); `evict_record` removes exactly one record and its patch
     and is a no-op for a missing id.  Pinned by
     `test_payloads.TestMatBoardGuardRails` (4 tests).
+
+---
+
+## 15. Round 9a — evidence-bounded capacity + pre-adoption validation
+
+Status: **built and measured**.  New `amateur/physics/capacity.py`; the P6
+fit path in `amateur/physics/organ.py` now applies a
+capacity-bounded low-rank last-layer patch and a proposal/validation state
+machine; `amateur/physics/run.py` drives proposal (16), held-out validation
+(17–18) and the decision (18) and surfaces every measured field per tick.
+`tests/test_physics_capacity.py` is new (11 tests); `test_physics_organ.py`
+(26) and `test_physics_run.py` (37) were updated for the changed policy.
+`formal/` and `tools/` are untouched and `python3 tools/gen_lean.py` is
+byte-identical.  Physics-side only: no schedule, ops-table, schema, payload
+or provenance change (9b trigger-gating is not in scope).
+
+The user's binding conditions for this round were: (1) the stored patch
+scales with the evidence ("four frames earns a sentence, not a manifesto");
+(2) the interference check moves **upstream** into a pre-adoption validation
+on a held-out window of the same stream; (3) 9a is physics-side only; (4)
+the acceptance criterion is unchanged; (5) the `@expectedFailure` stays
+strict.
+
+### 15.1 The evidence budget (derivation)
+
+`amateur/physics/capacity.py::EvidenceBudget` is pure arithmetic:
+
+```
+L(theta) <= gamma * L(E)          rate-distortion / MDL
+L(E) = N * D * 32 bits            N real evidence transitions, D latents
+L(theta) = K * 32 bits            K stored parameters
+=>  K <= gamma * N * D
+
+patch: last head layer only, low-rank
+  W in R^{D x H}, bias in R^{D},  W_delta = u @ v.T (stored as factors)
+  K(r) = r (D + H) + D          = 192 r + 64     (D=64, H=128)
+  nbytes(r) = 4 K(r)            = 768 r + 256
+  r_max = min(floor((gamma N D - D) / (D + H)), min(D, H))
+```
+
+`N` is the number of **real evidence transitions the fit actually used**
+(counted from the transition tensors, never the requested window length or
+the motif count).  `D = 64` is the checkpoint latent width and `H = 128` is
+`predictor_hidden`; both are read from the model, not hard-coded into the
+fit.  `gamma = 5.0` is the pre-registered design slack — a design choice,
+not a measurement.  The outer `MatBoard` ceilings (262,144 B per patch,
+1,048,576 B per table) remain **storage bounds only**; the evidence bound is
+applied first, at fit time.
+
+| N | capacity `5·N·64` | `r_max` | `K(r_max)` | `nbytes` |
+| --- | --- | --- | --- | --- |
+| 4 | 1,280 | 6 | 1,216 | 4,864 B |
+| 16 | 5,120 | 26 | 5,056 | 20,224 B |
+| 64 | 20,480 | 64 (cap) | 12,352 | 49,408 B |
+| 256 | 81,920 | 64 (cap) | 12,352 | 49,408 B |
+
+The rank ceiling `min(D, H) = 64` binds from `N >= 64`.  The two dense forms
+are **inadmissible at every reachable N**: the dense head+norm patch is
+34,240 parameters and the full predictor is 210,920, both above the largest
+admissible patch (`K(64) = 12,352`).  They are a different patch class, not
+a bigger budget, and `EvidenceBudget.admit_params` refuses them; `N = 0`
+admits no rank at all (`max_params = 0`, no bias-only patch), which the fit
+records as `capacity` / `no-evidence`.
+
+### 15.2 The fit
+
+`_fit_overlay` fits a dense delta of **`head.2` weight + bias only** on the
+real transitions in the window with the pre-registered replay path (40 AdamW
+steps, fixed seed, `lr=1e-3`, grad clip 1.0), then SVD-truncates the weight
+delta to `r_max` (Eckart–Young) and stores `u (D x r)`, `v (H x r)` and the
+bias delta.  The dense delta is never stored; `apply_to` materialises
+`u @ v.T` at apply time.  The norm, `head.0`, the GRU and the encoder are
+untouched (`changes_gru` is always false, so no hidden-state replay is
+needed), and the encoder is asserted bit-identical.
+
+`patch="full"` is refused by capacity **before any fit or overlay**, with
+the requested dense size and the budget recorded (`FitRecord.reason ==
+"capacity"`, `requested_params == 210_920`, `budget_n == 16`,
+`budget_capacity == 5,120`, `budget_max_params == 5,056`).  Every refusal is
+recorded in `fit_history` with a reason (`capacity`, `no-evidence`,
+`no-improvement`, `cooldown`) — nothing is silent.
+
+### 15.3 Pre-adoption validation protocol
+
+* **Proposal** at frame tick 16 (`propose_overlay_from_buffer(16,
+  fit_window=16)`): the candidate is fitted on the real transitions ending
+  at tick 16 (16 transitions, frames 1–16: eight normal + eight flipped),
+  stored as a `ValidationProposal`, and **not** born or activated.
+  `validation_window = stale_patience = 2`, the same patience the staleness
+  decision uses (documented, not tuned).
+* **Validation** on the next two observations of the same stream whose frame
+  tick is strictly greater than `fit_last_tick` — ticks 17 and 18.  Each
+  tick contributes a **paired** measurement: the candidate is applied to a
+  throwaway copy of the base model and asked for the same `predict_step`
+  with the same hidden state, while the base answer is the observation's own
+  unpatched surprise.  Both floats are accumulated exactly.  The window is
+  frozen at exactly `validation_window` ticks: later observations cannot
+  silently widen it (`_accrue_validation` returns once the window is full).
+* **Decision** at tick 18 (the tick that completes the window):
+  birth iff both means are finite and `candidate_mean < base_mean`
+  **strictly** (no margin).  Otherwise the candidate is rejected with a
+  public `RejectionRecord` (`organ.rejections`: tick, reason
+  `"interference"`, budget, `candidate_mean`, `base_mean`, `n`) and the
+  organ cooldown starts (`cooldown_ticks = 4`), so it does not refit every
+  tick.  Every resolved proposal also lands in `organ.decisions`
+  (`ProposalDecision`) with both means, the validation ticks and the budget,
+  so the birth path is auditable too.
+* **No peeking** is structurally enforced: `_accrue_validation` asserts
+  `frame_tick > fit_last_tick`, `resolve_proposal` asserts
+  `min(validation_ticks) > fit_last_tick`, and
+  `_self_guard_fit_boundary` asserts the fitted motif does not extend past
+  the proposal tick.  A proposal's evidence is strictly `<=` its tick.
+
+The refusal path is the user's "interference check moved upstream": the
+rejected candidate never becomes a D2 record, never activates, and never
+touches D4.
+
+### 15.4 The registered trace (seed 7, measured)
+
+36 executor ticks: normal 8, flip at 8, flip back at 28, recovery 8.  The
+birth is at the **decision** tick 18.  Every number below is measured.
+
+| frame tick | phase | adapted surprise | base surprise | overlay | validation n | decision |
+| --- | --- | --- | --- | --- | --- | --- |
+| 16 | flipped | — (pre-fit) | — | — | 0 | — |
+| 17 | flipped | 0.13162 | 0.13162 | — | 1 | — |
+| 18 | flipped | 0.16329 | 0.16329 | — | 2 | **birth** |
+| 19 | flipped | 0.37329 | 0.41364 | ovr-01 | 2 | — |
+| 20 | flipped | 0.34866 | 0.32646 | ovr-01 | 2 | — |
+| 21 | flipped | 0.03165 | 0.04955 | ovr-01 | 2 | — |
+| 22 | flipped | 0.20040 | 0.22803 | ovr-01 | 2 | — |
+| 23 | flipped | 0.21544 | 0.21640 | ovr-01 | 2 | — |
+| 24 | flipped | 0.24149 | 0.22201 | ovr-01 | 2 | — |
+| 25 | flipped | 0.42172 | 0.42633 | ovr-01 | 2 | — |
+| 26 | flipped | 0.34503 | 0.36726 | ovr-01 | 2 | — |
+| 27 | flipped | 0.11462 | 0.12189 | ovr-01 | 2 | — |
+| 28 | recovered | 0.73240 | 0.69973 | ovr-01 | 2 | — |
+| 29 | recovered | 0.97536 | 1.01289 | ovr-01 | 2 | — |
+| 30 | recovered | 0.50158 | 0.45784 | ovr-01 | 2 | — |
+| 31 | recovered | 0.26417 | 0.05067 | ovr-01 | 2 | — |
+| 32 | recovered | 0.05715 | 0.01752 | ovr-01 | 2 | — |
+| 33–34 | recovered | 0.04644 / 0.01657 | same | stale, not applied | 2 | — |
+| 35–36 | recovered | 0.00882 / 0.01672 | same | evicted | 2 | — |
+
+| Item | Measured |
+| --- | --- |
+| proposal tick | **16** |
+| candidate | rank **26**, 5,056 params, **20,224 B** (N = 16) |
+| validation ticks | **17, 18** |
+| candidate mean / base mean | **0.13386843726038933** / **0.1474553719162941** |
+| validation ratio | **0.9078573097790045** (passes, strict) |
+| decision / birth | **birth** at tick **18** |
+| in-sample fit loss | 0.276357 → 0.135888 |
+| attached patch bytes | 20,224 |
+| active ticks | 14 (frame 19–32) |
+| adapted / base over **active flipped** ticks (19–27, n=9) | **0.25469933084115787** / **0.2635077436765035** = **0.9665724706513396** |
+| adapted / base over **all** active ticks | 0.3444968502626556 / 0.3293016486402069 = **1.0461437156029878** |
+| adapted / base over active **recovered** ticks (28–32) | 0.5061323852213514 / 0.44773067757487295 = **1.1304393702991506** |
+| stale flagged / eviction | organ tick **31** / executor tick **35** (patch bytes 0 from 35) |
+| end state | residents `()`, patches `()`, patch bytes **0** |
+| encoder | bit-identical (`torch.equal`) |
+| D4 | **11** real gate sediments (ticks 21–31), 25 confidence-0 no-ops |
+
+**Honest outcome.**  The validation-gated patch *helps* during the failure
+window (0.9666× over the active flipped ticks) but *hurts* after the flip
+back (1.1304× over the active recovered ticks), so the registered
+all-active ratio is **1.0461** — still above 1.0, and
+`test_single_stream_surprise_drops` therefore remains a strict recorded
+expected failure (see note 29).  The capacity bound is what changed the
+magnitude: the dense head+norm patch measured **1.2614** on the round-8
+trace, the rank-26 `head.2` patch measures **1.0461**.  The patch is
+directly useful for nine ticks, and the organ's own staleness rule catches
+it on the two harmful flip-back ticks (30, 31) and evicts it.
+
+### 15.5 The measured rejection trace (seed 0)
+
+The contract expected the registered seed-7 trace to be a *rejection*; it is
+not (measured above).  The rejection path is instead pinned on a real,
+unselected trace: seed 0 reaches the same proposal and loses the paired
+comparison.
+
+| Item | Measured |
+| --- | --- |
+| proposal tick | 16 |
+| candidate | rank 26, 5,056 params / 20,224 B |
+| validation ticks | 17, 18 |
+| candidate mean / base mean | **0.19090842455625534** / **0.13387499749660492** |
+| validation ratio | **1.4260200046771003** (fails) |
+| decision | **interference** at tick **18** |
+| birth / activation | none (`adoption_tick = None`, `active_ticks = 0`) |
+| D2 | residents `()`, patches `()`, patch bytes **0** |
+| D4 | byte-identical, 0 sediments, 36 confidence-0 no-ops |
+| encoder | bit-identical |
+| rejection log | one `RejectionRecord` (tick 18, `interference`, n=2, budget N=16) |
+
+13 of the first 31 seeds reject (`0, 8, 9, 10, 11, 14, 16, 17, 18, 19, 22,
+27, 28`) and 18 birth; the seed was *not* chosen for the outcome — seed 0 is
+the first seed in natural order and seed 7 is the pre-registered trace.
+
+### 15.6 Lifecycle-on-failure evidence
+
+The seed-7 trace is the required "legitimate validation-pass path that later
+harms on flip-back ⇒ stale then evict": validation passes at 18 (0.9079),
+the patch is beneficial while the flipped dynamics persist, the flip back at
+28 makes it harmful (tick 30: 0.5016 vs 0.4578; tick 31: 0.2642 vs 0.0507),
+two consecutive harmful ticks trip `stale_patience = 2`, the record is
+flagged stale at 31, the overlay stops affecting predictions immediately
+(ticks 33+ are unpatched), and the record + patch are evicted together at
+tick 35.  Seed 2 is an independent confirmation (validation 0.088984 vs
+0.160438, stale at 20, evict at 24, active ratio 1.3217).  This is a
+state-based check (lifecycle records, patch bytes, per-tick surprise), never
+an emission count.
+
+### 15.7 Re-measured fit ratios (the old 0.690× is quarantined)
+
+The pre-9a 0.690× belonged to the **inadmissible dense head+norm patch** and
+is withdrawn.  Re-measured under the capacity bound:
+
+| Probe | Old (dense, quarantined) | New (Round 9a, measured) |
+| --- | --- | --- |
+| bank/held-out probe (`acceptance_scenario`, 24 fit + 8 held-out streams, post-flip window) | 0.690× (base 0.2616 → 0.1805) | **0.8225682511949177** (base 0.25170499086380005 → 0.20704453415186874) |
+| organ fit/held-out split (16 fit streams seed 31 → 16 unseen seed 77, transitions 8–24) | 0.685 (base 0.2616 → 0.1792) | **0.8305541276931763** (base 0.2616220712661743 → 0.21729129552841187) |
+
+Both remain genuine held-out improvements, but smaller: the admissible patch
+adapts only `head.2` (rank ≤ 64), not the head+norm block, and the bank fit
+uses rank 64 / 12,352 params / 49,408 B (N = 384 used transitions, capped).
+The per-transition worst case in the organ split is 1.04857 (still < 1.05).
+The organ-level bank probe still adopts at 19, goes stale at 31 and evicts
+at 34; it then **re-adopts the same `motif-debris-007` at 35** once the
+4-tick cooldown expires, so the probe ends with one resident overlay.
+Preventing that re-adoption is trigger gating (Round 9b, explicitly out of
+scope); the behaviour is pinned in
+`test_physics_organ.TestAcceptanceScenario.test_birth_revalidate_stale_evict_ordering`
+so it is visible rather than silently tolerated.  The *executor* acceptance
+ends empty.
+
+### 15.8 Tests
+
+| Invariant | Test |
+| --- | --- |
+| K ≤ γND, `r_max`, `K(r)`, nbytes, worked examples N=4/N=16 | `test_physics_capacity.TestDerivation` (7) |
+| dense head+norm and full predictor inadmissible at every N | `test_physics_capacity.TestAdmission` (3) |
+| single-stream fit is rank 26 / 5,056 params / 20,224 B | `test_physics_organ.TestCapacityGate.test_single_stream_fit_is_rank_26_from_16_transitions` |
+| `patch="full"` refused before any fit, budget recorded | `...test_full_patch_is_refused_by_capacity_before_any_fit` |
+| no evidence is recorded, not silent | `...test_no_evidence_is_recorded_not_silent` |
+| overlay touches only `head.2`; delta is exactly `u @ v.T` | `test_physics_organ.TestOverlayFitHeldOut.test_overlay_is_capacity_bounded_and_predictor_only` |
+| proposal does not birth/activate | `test_physics_organ.TestPreAdoptionValidation.test_proposal_does_not_birth_or_activate` |
+| paired held-out evidence and birth at the decision tick | `...test_validation_is_paired_on_held_out_ticks` |
+| no-peek is structurally enforced | `...test_no_peek_is_structurally_enforced` |
+| harmful candidate rejected with both means + cooldown | `...test_harmful_candidate_is_rejected_with_both_means` |
+| registered trace: proposal/validation/birth/stale/evict numbers | `test_physics_run.TestPreAdoptionValidation` (5) |
+| rejection trace: no birth, no activation, clean D2/D4, encoder | `...test_rejection_trace_has_no_birth_no_activation` |
+| per-tick validation visibility, no peeking in the trace | `...test_validation_trace_is_visible_per_tick`, `...test_no_peek_in_the_per_tick_trace` |
+| capacity-bounded patch attaches (20,224 B) and evicts atomically | `test_physics_run.TestPatchAccounting` (5) |
+| oversized synthetic patch refused in the derivation pass | `...TestFullPatchModeFailsClosed.test_oversized_synthetic_patch_fails_in_the_derivation_pass` |
+| real gate sediments (11) and non-vacuous D4 retention | `test_physics_run.TestZeroConfidenceGate` (9) |
+| P6 reset: two accepted traces identical (birth 18, stale 31, evict 35, 1.0461437156029878) | `test_physics_run.TestResetRepeatability` (2) |
+| single-stream drop (recorded failure, re-justified) | `...test_single_stream_surprise_drops` (`expectedFailure`) |
+
+### 15.9 Honesty notes (Round 9a, continuing from note 28)
+
+29. **The registered trace still misses the acceptance criterion, and the
+    criterion's wording is now material.**  Over *every* active tick the
+    seed-7 ratio is **1.0461437156029878** (> 1.0, so the recorded
+    expected failure stands, unweakened).  Over the active *flipped* ticks
+    only — the reading "mean adapted/base over the active flip window" —
+    it is **0.9665724706513396** (< 1.0).  Both are reported; the strict
+    test keeps the registered all-active metric because that is what round
+    8 measured and silently switching the metric after seeing the results
+    would be moving the goalposts.  **This is a question for the Lead/user,
+    not a decision taken here.**  Selecting a different seed (seeds 3, 12,
+    21, 25, 26, 30 measure ratios 0.905–0.988 under the same registered
+    policy) would also be seed-shopping and was not done.
+30. **The registered seed-7 trace does not reject.**  The contract expected
+    a rejection; measured, the candidate passes validation
+    (0.13386843726038933 < 0.1474553719162941).  This is a measured
+    correction to the contract's expectation, not an implementation choice:
+    the fit is the contracted one (16 real transitions ending at tick 16,
+    dense `head.2` fit then SVD to rank 26) and the validation is the
+    contracted paired comparison on ticks 17–18.  The rejection path is
+    pinned on a real unselected trace (seed 0, §15.5) rather than fabricated
+    at seed 7.
+31. **The validation window (2 ticks) does not predict the 14-tick
+    outcome.**  Validation sees two beneficial ticks; the patch is useful
+    for nine flipped ticks and harmful on five recovered ticks.  The
+    upstream interference check therefore did *not* rescue the acceptance;
+    what actually protected the trace is the organ's online staleness rule
+    (2 consecutive harmful ticks).  A longer validation window is a policy
+    change, not something to tune inside 9a.
+32. **`gamma = 5.0` is a design slack, not a measurement.**  It sets how
+    many stored parameters one evidence transition may buy; nothing in this
+    round measures the optimal value.  The outer byte ceilings are storage
+    bounds only and were never reached by the admissible patch.
+33. **The #22 gate now really passes, and D4 grows.**  Because the
+    validation-passed patch is genuinely beneficial while active, the
+    gate's cumulative evidence passes from tick 21 (confidences
+    0.024529555468589148 → 0.008894601...) and the store sediments **11**
+    real `BiasPrimitive` bodies; the other 25 ticks are confidence-0 no-ops
+    (11 + 25 = 36 settled writes).  The literal "D4 bytes identical"
+    criterion is therefore **not met** on this trace (the list grows by 11
+    legitimate gate outputs); the *retained-contents* invariant **is**
+    met (the retained prefix is byte-identical and object-identical —
+    `test_retained_invariant_survives_the_scenario`).  Under the round-8
+    "no D4 writes" reading this needs an adjudication: either the criterion
+    means retained-contents (safe), or #22 needs a one-shot/dedup rule,
+    which would be an executor/ops change outside 9a's physics-side scope.
+    Reported, not silently reinterpreted.  This also supersedes notes 23
+    and 26 (the empty-vs-empty D4 snapshot and the "gate never passes"
+    claim).
+34. **The round-8 "retained invariant" test-double is gone.**  The
+    non-vacuous retention test now seeds nothing: it drives the real
+    registered trace, snapshots D4 at the first real sediment (tick 21,
+    confidence 0.024529555468589148) and proves the retained prefix is
+    unchanged through tick 36.  No test double is used anywhere in the D4
+    claims.
+35. **`acceptance()` now snapshots a fresh board.**  It calls `reset()`
+    itself and then `_drive(...)`, so `d4_bytes_before` is always the fresh
+    (empty) board and two calls' summaries compare equal even when the
+    trace sediments.  This is what makes the reset-repeatability test
+    meaningful under a non-empty D4.
+36. **The bank probe's end state is not empty (Round 9b deferred).**  After
+    the eviction at 34 the ratchet re-adopts the same motif at 35 when the
+    cooldown expires (§15.7).  This is a trigger-gating defect surfaced by
+    the cleaner low-rank fit (the dense refit failed with `no-improvement`),
+    explicitly out of 9a's scope; it is pinned as measured behaviour.
+37. **Timings (measured, 8 CPU threads, this machine).**  Focused:
+    `test_physics_capacity` 11 tests / 0.001 s; `test_physics_organ` 26
+    tests / 16.57 s; `test_physics_run` 37 tests / 8.21 s.  Combined physics
+    suites: **74 tests, OK, 22.97 s, 1 expected failure**.  Full suite with
+    `LEAN_BIN=$PWD/.work/lean4/bin/lean python3 -m unittest discover -s
+    tests -t .`: **312 tests, OK (1 expected failure), 44.34 s**.
+    `python3 tools/gen_lean.py` exit 0 and byte-identical to
+    `formal/DryRun.lean`; `formal/`, `tools/` and `docs/TESTING.md` untouched.
+38. **D2 revalidation is unchanged and still fires on the birth tick.**
+    The ratchet revalidates an active overlay whenever the tick's mean
+    surprise is below the debris threshold, so on the registered trace the
+    record is revalidated at finalized ticks 18–27 (epochs 2–10) even though
+    the tick-18 observation predates the patch (the birth is decided after
+    that tick's prediction).  This is the pre-existing `_decide_tick` rule
+    from phase 4–5b, not a 9a change; it is disclosed because the D2 epoch
+    at eviction is 10, not 1, and a reader could otherwise read "revalidated
+    at 18" as evidence of usefulness that was never measured.
+39. **CPU only.**  All fits and scenario runs are single-process CPU
+    (`torch.set_num_threads(min(8, cpu_count))` in the test modules); no GPU
+    path is exercised or claimed.

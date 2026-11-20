@@ -20,9 +20,13 @@ Three layers, each independently testable
    cluster is stable), and :class:`CollapseMandate` (when the ceiling forces
    a collapse).
 3. :class:`OverlayTable` + :class:`PredictorOverlay` (P6) -- a cheap
-   predictor-only patch keyed by ``overlay_id``, stored in a side table,
-   with ``(epoch, overlay_id, status)`` records, birth / revalidate /
-   stale / evict transitions and capacity 4.  **The encoder is never
+   predictor-only, **capacity-bounded low-rank** patch keyed by
+   ``overlay_id``, stored in a side table, with ``(epoch, overlay_id,
+   status)`` records, birth / revalidate / stale / evict transitions and
+   capacity 4.  Round 9a: the stored substance is a low-rank delta of the
+   last head layer only (``u @ v.T`` + bias), with the rank set by the
+   evidence budget in :mod:`amateur.physics.capacity`; a dense head+norm
+   or full-predictor patch is inadmissible.  **The encoder is never
    touched:** fitting happens on a deep copy of the predictor and the
    encoder parameters are asserted bit-identical (``torch.equal``) before
    and after every fit.
@@ -52,15 +56,23 @@ memo's honesty notes.
 
 Measured limits (honest, see the memo's numbered notes)
 -------------------------------------------------------
-* A predictor-only patch fitted on a **single** stream's window does not
-  improve forward surprise (measured ratios 0.99-1.18x); it only fits its
-  window.  The overlay is therefore demonstrated on a **bank of streams**
-  with a fit/held-out split, which is a shaped probe, not the executor's
-  single-stream flow.
-* A head-only patch is used by default: it leaves the GRU (and therefore
-  the online hidden state) unchanged, so applying/clearing an overlay is
-  exact with no hidden-state replay.  A full-predictor patch is available
-  for measurement only.
+* A predictor-only patch fitted on a **single** stream's window is not
+  guaranteed to improve forward surprise.  Round 9a's capacity-bounded
+  rank-26 patch measures 0.9666x over the active *flipped* ticks and
+  1.0461x over every active tick of the registered seed-7 trace, and it
+  passes pre-adoption validation (0.9079x on the held-out ticks 17-18).
+  The bank fit/held-out probe remains the shaped positive result (0.8226x
+  on unseen streams); see ``docs/phase4-5-design.md`` §15.
+* Only the last head layer is adapted (low-rank, ``head.2`` weight + bias):
+  the GRU and hidden state are untouched, so applying/clearing an overlay is
+  exact with no replay, and the encoder is never part of any fit.  Round 9a
+  makes the dense head+norm and full-predictor patches inadmissible; the
+  exact byte ceilings in D2 remain as storage bounds.
+* Pre-adoption validation (Round 9a): a fitted candidate is *proposed*, not
+  adopted.  It is validated against the base predictor on the next
+  ``validation_window`` held-out observations of the same stream and born
+  only if it wins with a strict mean comparison; otherwise the rejection is
+  recorded publicly with both means (``PhysicsOrgan.rejections``).
 """
 from __future__ import annotations
 
@@ -74,6 +86,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 import torch
 
+from .capacity import EvidenceBudget
 from .data import _action_rng, _episode_seed
 from .env import PhysicsEnv, WorldConfig
 from .micro_lewm import MicroLeWM
@@ -86,6 +99,7 @@ __all__ = [
     "DigestResult",
     "DigestThresholds",
     "DigestedDebris",
+    "EvidenceBudget",
     "FitRecord",
     "Observation",
     "OverlayRecord",
@@ -93,9 +107,12 @@ __all__ = [
     "Phase3Stats",
     "PhysicsOrgan",
     "PredictorOverlay",
+    "ProposalDecision",
     "RatchetResult",
+    "RejectionRecord",
     "ResidualDigester",
     "StructuralMotif",
+    "ValidationProposal",
     "derive_thresholds",
 ]
 
@@ -662,48 +679,97 @@ class ResidualDigester:
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class PredictorOverlay:
-    """A cheap predictor-only patch, stored by ``overlay_id`` in a side table.
+    """A capacity-bounded, predictor-only **low-rank** patch.
 
-    ``deltas`` maps predictor parameter names to additive tensors; it never
-    contains encoder parameters.  ``changes_gru`` is true when the patch
-    touches the GRU (a full-predictor fit), which requires replaying the
-    causal cache to reseed each stream's hidden state when the overlay is
-    applied or cleared.  A head-only patch leaves the GRU untouched and
-    needs no replay.
+    The stored substance is the last head layer's deltas in factored form:
+
+    * ``u`` -- ``(latent_dim, rank)``: left factor, singular values absorbed;
+    * ``v`` -- ``(head_in, rank)``: right factor;
+    * ``bias`` -- ``(latent_dim,)``: the bias delta.
+
+    ``apply_to`` materialises ``u @ v.T`` at apply time; the dense weight
+    delta is **never stored** (Round 9a's evidence bound).  ``param_count``
+    and ``nbytes`` are derived from the stored tensors, so a record cannot
+    claim a size its factors do not have.
+
+    ``changes_gru`` is always false: the patch touches only ``head.2``, so
+    the GRU (and therefore the online hidden state) is unchanged and
+    applying/clearing an overlay needs no replay.
     """
 
     overlay_id: str
-    deltas: dict[str, torch.Tensor]
-    param_count: int
+    u: torch.Tensor
+    v: torch.Tensor
+    bias: torch.Tensor
     fit_transitions: int
     fit_streams: int
     loss_before: float
     loss_after: float
     patch: str
+    #: ``K(max_rank)`` of the :class:`~amateur.physics.capacity.EvidenceBudget`
+    #: that admitted this patch (0 for an externally built probe patch).
+    capacity: int = 0
+    #: ``N``, the real evidence transitions the budget was derived from.
+    budget_n: int = 0
 
     @property
-    def changes_gru(self) -> bool:
-        return any(name.startswith("gru.") for name in self.deltas)
+    def rank(self) -> int:
+        return int(self.u.shape[1])
+
+    @property
+    def param_count(self) -> int:
+        return (
+            int(self.u.numel()) + int(self.v.numel()) + int(self.bias.numel())
+        )
 
     @property
     def nbytes(self) -> int:
-        return sum(tensor.numel() * tensor.element_size() for tensor in self.deltas.values())
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (self.u, self.v, self.bias)
+        )
+
+    @property
+    def changes_gru(self) -> bool:
+        return False
+
+    @property
+    def delta_shapes(self) -> tuple[tuple[int, int], tuple[int, int], tuple[int,]]:
+        """The materialised shape triple (audit: no dense storage)."""
+        return (
+            (int(self.u.shape[0]), int(self.v.shape[0])),
+            (int(self.v.shape[0]), int(self.v.shape[1])),
+            (int(self.bias.shape[0]),),
+        )
+
+    def materialise(self) -> torch.Tensor:
+        """The dense ``(latent_dim, head_in)`` weight delta (apply time only)."""
+        return torch.matmul(self.u, self.v.t())
 
     def apply_to(self, model: MicroLeWM) -> None:
-        """Add the patch to ``model.predictor`` in place (no grad)."""
-        parameters = dict(model.predictor.named_parameters())
+        """Add the materialised patch to ``model.predictor.head.2`` (no grad).
+
+        Only the last head layer is touched: the norm, ``head.0``, the GRU
+        and every encoder parameter are left bit-identical.
+        """
+        head = model.predictor.head[-1]
         with torch.no_grad():
-            for name, delta in self.deltas.items():
-                parameters[name].add_(delta)
+            head.weight.add_(self.materialise().to(head.weight.dtype))
+            head.bias.add_(self.bias.to(head.bias.dtype))
 
 
 @dataclass(frozen=True)
 class FitRecord:
-    """Lightweight diagnostics of one overlay fit (no tensors).
+    """Lightweight diagnostics of one overlay fit attempt (no tensors).
 
-    The patch tensors belong to the D2 store (``MatBoard``) while the
+    The patch factors belong to the D2 store (``MatBoard``) while the
     overlay is resident; this record keeps only scalars so the organ holds
     no tensor after an eviction (Q1-A "no organ-side retention").
+
+    ``reason`` is empty for an admitted fit and one of ``capacity`` /
+    ``no-evidence`` / ``no-improvement`` / ``cooldown`` for a refusal.  A
+    refusal is **recorded**, never silent, and carries the evidence budget
+    it was judged against (Round 9a).
     """
 
     overlay_id: str
@@ -714,6 +780,79 @@ class FitRecord:
     loss_before: float
     loss_after: float
     patch: str
+    rank: int = 0
+    budget_n: int = 0
+    budget_capacity: float = 0.0
+    budget_max_params: int = 0
+    requested_params: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ValidationProposal:
+    """A fitted candidate awaiting held-out validation (Round 9a).
+
+    The candidate is fitted on real transitions **ending at
+    ``proposal_tick``** (``fit_last_tick == proposal_tick``) and is not
+    born or activated by :meth:`PhysicsOrgan.propose_overlay_from_buffer`.
+    It is validated on the next ``validation_window`` observations of the
+    same stream whose frame tick is strictly greater than
+    ``fit_last_tick``; the paired candidate-vs-base surprise on each such
+    transition is accumulated, and the birth decision is taken at the tick
+    the window completes.
+    """
+
+    proposal_id: str
+    stream: int
+    proposal_tick: int
+    fit_first_tick: int
+    fit_last_tick: int
+    fit_window: int
+    validation_window: int
+    motif_id: str
+    budget: EvidenceBudget
+    candidate: PredictorOverlay
+
+
+@dataclass(frozen=True)
+class RejectionRecord:
+    """One public, test-readable pre-adoption rejection.
+
+    ``reason`` is ``"interference"`` for a candidate that lost the paired
+    held-out comparison; the record carries the measured means and the
+    evidence budget the candidate was fitted under, so the refusal can be
+    audited without re-running the fit.
+    """
+
+    tick: int
+    reason: str
+    budget: EvidenceBudget | None
+    candidate_mean: float
+    base_mean: float
+    n: int
+
+
+@dataclass(frozen=True)
+class ProposalDecision:
+    """One resolved pre-adoption proposal (birth or interference rejection).
+
+    Records the measured held-out means and the evidence budget even on the
+    birth path, so the decision is auditable from the decision log alone
+    (the rejection log is the ``outcome != "birth"`` view of this list).
+    """
+
+    tick: int
+    proposal_id: str
+    proposal_tick: int
+    outcome: str
+    candidate_mean: float
+    base_mean: float
+    n: int
+    validation_ticks: tuple[int, ...]
+    rank: int
+    param_count: int
+    capacity: int
+    budget_n: int
 
 
 @dataclass(frozen=True)
@@ -1072,6 +1211,20 @@ class PhysicsOrgan:
         self.history: list[RatchetResult] = []
         self.observations: list[Observation] = []
         self.fit_history: list[FitRecord] = []
+        #: Round 9a: pre-adoption validation state (fitted candidate, the
+        #: paired evidence accumulated so far, and the public decision log).
+        self._proposal: ValidationProposal | None = None
+        self._proposal_serial = 0
+        self._validation_candidate_sum = 0.0
+        self._validation_base_sum = 0.0
+        self._validation_ticks: list[int] = []
+        self.proposals: list[ValidationProposal] = []
+        self.rejections: list[RejectionRecord] = []
+        self.decisions: list[ProposalDecision] = []
+        self.refusals: list[dict[str, Any]] = []
+        #: The budget of the most recent fit attempt (diagnostic; also read by
+        #: ``propose_overlay_from_buffer`` to attach it to the proposal).
+        self.last_budget: EvidenceBudget | None = None
 
     # ------------------------------------------------------------ internals
     def _snapshot_encoder(self) -> None:
@@ -1191,6 +1344,7 @@ class PhysicsOrgan:
         if state.prev_latent is not None:
             if action is None:
                 raise ValueError("action is required after the first frame")
+            hidden_before = state.hidden
             with torch.no_grad():
                 prediction, hidden = self.working_model.predict_step(
                     state.prev_latent, int(action), state.hidden
@@ -1211,6 +1365,20 @@ class PhysicsOrgan:
             base_surprise = float(
                 torch.mean(base_error * base_error).detach()
             )
+            if (
+                self._proposal is not None
+                and int(stream) == self._proposal.stream
+            ):
+                # Round 9a: paired candidate-vs-base surprise on this
+                # held-out transition, before any adoption decision.
+                self._accrue_validation(
+                    frame_tick=state.tick,
+                    prev_latent=state.prev_latent,
+                    action=int(action),
+                    hidden=hidden_before,
+                    latent=latent,
+                    base_surprise=base_surprise,
+                )
         elif self._active_adapter is None:
             base_surprise = surprise
         if state.prev_latent is not None:
@@ -1482,10 +1650,12 @@ class PhysicsOrgan:
 
         Evidence-injection hook: the production path accrues per-tick
         evidence and publishes after ``stale_patience`` applied ticks; this
-        method publishes a supplied verdict so the gate's passing branch can
-        be exercised without a successful adaptation.  This slice has none
-        -- the registered acceptance's cumulative evidence is harmful -- so
-        the passing branch is only reachable through this hook.
+        method publishes a supplied verdict so the gate's branches can be
+        driven deterministically in isolation.  Round 9a's registered trace
+        also reaches the passing branch through the real accrual path (the
+        validation-gated patch is beneficial while active -- see
+        ``test_d4_sediments_are_the_real_gate_output``), so this hook is a
+        convenience, not the only route.
         """
         adapted = float(adapted)
         base = float(base)
@@ -1521,31 +1691,61 @@ class PhysicsOrgan:
         self.history.clear()
         self.observations.clear()
         self.fit_history.clear()
+        self._proposal = None
+        self._proposal_serial = 0
+        self._validation_candidate_sum = 0.0
+        self._validation_base_sum = 0.0
+        self._validation_ticks = []
+        self.proposals.clear()
+        self.rejections.clear()
+        self.decisions.clear()
+        self.refusals.clear()
+        self.last_budget = None
         self.working_model = copy.deepcopy(self.base_model)
         self.working_model.eval()
 
-    def adopt_overlay_from_buffer(
+    def propose_overlay_from_buffer(
         self,
         tick: int,
         *,
         fit_window: int = 16,
+        stream: int = 0,
         motif_id: str = "single-stream",
-    ) -> OverlayRecord | None:
-        """Single-stream adaptation: fit the predictor patch on the last
-        ``fit_window`` real transitions of the same stream and install it.
+        validation_window: int | None = None,
+    ) -> ValidationProposal | None:
+        """Fit a candidate on the last ``fit_window`` real transitions of one
+        stream **ending at** ``tick`` and hold it for pre-adoption validation.
 
-        This is the pre-registered bounded-replay policy for the executor
-        acceptance: same-stream data only, no cross-stream bank data, no
-        post-hoc fit-variant selection.  It reuses the ratchet's fitting
-        path (``_fit_overlay``) with a synthetic motif whose window is the
-        replay buffer.  Returns the birth record, or ``None`` when the fit
-        cannot improve its own window (the caller must report that
-        honestly, not retry with another variant).
+        Round 9a (user decision 2): the interference check moves upstream.
+        The candidate is *not* born and *not* activated here.  It is
+        validated on the next ``validation_window`` observations of the same
+        stream whose frame tick is strictly greater than ``fit_last_tick``
+        (default ``validation_window = stale_patience = 2`` -- the same
+        patience the staleness decision uses, documented).  The birth
+        decision is taken by :meth:`resolve_proposal` once that window is
+        complete.
+
+        The fit sees only real transitions of this stream ending at
+        ``tick`` -- no data beyond the proposal tick, no cross-stream bank
+        data, no post-hoc fit-variant selection.  Returns ``None`` when no
+        candidate is admissible; the refusal is recorded in
+        ``fit_history`` with a ``reason`` (``capacity``, ``no-evidence``,
+        ``no-improvement`` or ``cooldown``).
         """
+        tick = int(tick)
         if fit_window < 2:
             raise ValueError("fit_window must be >= 2")
-        first_tick = max(1, int(tick) - int(fit_window) + 1)
+        if self._proposal is not None:
+            raise AssertionError(
+                "a pre-adoption proposal is already pending; resolve it before "
+                "fitting another candidate (one candidate at a time)"
+            )
+        if tick < self._cooldown_until:
+            self._record_refusal("cooldown", 0, EvidenceBudget(0), tick=tick)
+            return None
+        first_tick = max(1, tick - int(fit_window) + 1)
         if first_tick >= tick:
+            self._record_refusal("no-evidence", 0, EvidenceBudget(0), tick=tick)
             return None
         motif = StructuralMotif(
             motif_id=motif_id,
@@ -1556,18 +1756,227 @@ class PhysicsOrgan:
             persistence=int(fit_window),
             drift=0.0,
             first_tick=int(first_tick),
-            last_tick=int(tick) - 1,
+            last_tick=int(tick),
         )
-        overlay = self._fit_overlay(motif, int(tick))
+        overlay = self._fit_overlay(motif, tick)
         if overlay is None:
             return None
-        record = self.overlay_table.birth(overlay, motif_id=motif.motif_id, tick=int(tick))
-        self._set_active_overlay(record.overlay_id)
-        self._stale_run = 0
-        return record
+        budget = self.last_budget
+        if budget is None:  # pragma: no cover - every fit attempt sets it
+            raise AssertionError("fit admitted an overlay without a recorded budget")
+        self._self_guard_fit_boundary(motif, tick)
+        self._proposal_serial += 1
+        proposal = ValidationProposal(
+            proposal_id=f"prop-{self._proposal_serial:02d}",
+            stream=int(stream),
+            proposal_tick=tick,
+            fit_first_tick=int(first_tick),
+            fit_last_tick=tick,
+            fit_window=int(fit_window),
+            validation_window=int(
+                self.thresholds.stale_patience if validation_window is None
+                else validation_window
+            ),
+            motif_id=motif_id,
+            budget=budget,
+            candidate=overlay,
+        )
+        self._proposal = proposal
+        self._validation_candidate_sum = 0.0
+        self._validation_base_sum = 0.0
+        self._validation_ticks = []
+        self.proposals.append(proposal)
+        return proposal
+
+    def _self_guard_fit_boundary(self, motif: StructuralMotif, tick: int) -> None:
+        """No peeking: every fitted transition must end at or before ``tick``."""
+        if int(motif.last_tick) > int(tick):
+            raise AssertionError(
+                f"proposal evidence extends past the proposal tick: motif "
+                f"last_tick={motif.last_tick} > tick={tick}"
+            )
+
+    def _accrue_validation(
+        self,
+        *,
+        frame_tick: int,
+        prev_latent: torch.Tensor,
+        action: int,
+        hidden: torch.Tensor | None,
+        latent: torch.Tensor,
+        base_surprise: float,
+    ) -> None:
+        """Paired candidate-vs-base surprise on one held-out transition.
+
+        The candidate is applied to a **throwaway copy** of the base model;
+        the base answer is the observation's own (unpatched) surprise.  Both
+        values are accumulated as exact floats, paired on the same
+        transition, and only once the observation's frame tick is strictly
+        greater than the fit boundary (no peeking).
+        """
+        proposal = self._proposal
+        if proposal is None:
+            return
+        if len(self._validation_ticks) >= proposal.validation_window:
+            # The window is exactly ``validation_window`` ticks: extra
+            # observations cannot silently widen it.
+            return
+        if int(frame_tick) <= proposal.fit_last_tick:
+            raise AssertionError(
+                f"validation observed frame tick {frame_tick} at or before the "
+                f"fit boundary {proposal.fit_last_tick}; that would be peeking"
+            )
+        probe = copy.deepcopy(self.base_model)
+        proposal.candidate.apply_to(probe)
+        with torch.no_grad():
+            predicted, _ = probe.predict_step(prev_latent, int(action), hidden)
+            error = predicted - latent
+            candidate_surprise = float(torch.mean(error * error))
+        self._validation_candidate_sum += candidate_surprise
+        self._validation_base_sum += float(base_surprise)
+        self._validation_ticks.append(int(frame_tick))
+
+    def resolve_proposal(self, tick: int | None = None) -> OverlayRecord | None:
+        """Take the pre-adoption birth/rejection decision (Round 9a).
+
+        Births the candidate iff the held-out validation window is complete,
+        finite, and ``candidate_mean < base_mean`` **strictly** (no margin).
+        Otherwise the candidate is rejected with a public
+        :class:`RejectionRecord` (reason ``interference``, both measured
+        means, the evidence budget and ``n``), and the organ cooldown starts
+        so the caller does not refit on the next tick.
+
+        Returns the birth record, or ``None`` (no proposal, window still
+        open, or rejected).
+        """
+        proposal = self._proposal
+        if proposal is None:
+            return None
+        if len(self._validation_ticks) < proposal.validation_window:
+            return None
+        decision_tick = int(proposal.proposal_tick if tick is None else tick)
+        if min(self._validation_ticks) <= proposal.fit_last_tick:
+            raise AssertionError("validation evidence at or before the fit boundary")
+        n = len(self._validation_ticks)
+        candidate_mean = self._validation_candidate_sum / float(n)
+        base_mean = self._validation_base_sum / float(n)
+        validation_ticks = tuple(self._validation_ticks)
+        self._proposal = None
+        self._validation_candidate_sum = 0.0
+        self._validation_base_sum = 0.0
+        self._validation_ticks = []
+        passed = bool(
+            np.isfinite(candidate_mean)
+            and np.isfinite(base_mean)
+            and candidate_mean < base_mean
+        )
+        self.decisions.append(
+            ProposalDecision(
+                tick=decision_tick,
+                proposal_id=proposal.proposal_id,
+                proposal_tick=int(proposal.proposal_tick),
+                outcome="birth" if passed else "interference",
+                candidate_mean=float(candidate_mean),
+                base_mean=float(base_mean),
+                n=int(n),
+                validation_ticks=validation_ticks,
+                rank=proposal.candidate.rank,
+                param_count=proposal.candidate.param_count,
+                capacity=proposal.budget.max_params,
+                budget_n=proposal.budget.n_transitions,
+            )
+        )
+        if passed:
+            record = self.overlay_table.birth(
+                proposal.candidate, motif_id=proposal.motif_id, tick=decision_tick
+            )
+            self._set_active_overlay(record.overlay_id)
+            self._stale_run = 0
+            return record
+        self._cooldown_until = decision_tick + self.thresholds.cooldown_ticks
+        self.rejections.append(
+            RejectionRecord(
+                tick=decision_tick,
+                reason="interference",
+                budget=proposal.budget,
+                candidate_mean=float(candidate_mean),
+                base_mean=float(base_mean),
+                n=int(n),
+            )
+        )
+        return None
+
+    def proposal_state(self) -> dict[str, Any]:
+        """The current pre-adoption state (pending proposal or last decision).
+
+        Used by ``PhysicsRun`` to surface the validation trace per tick: on
+        the proposal tick ``validation_n`` is 0, on each validation tick it
+        grows, and from the decision tick onward ``decided`` is true with
+        the outcome and both measured means.
+        """
+        proposal = self._proposal
+        if proposal is not None:
+            n = len(self._validation_ticks)
+            return {
+                "proposal_id": proposal.proposal_id,
+                "proposal_tick": int(proposal.proposal_tick),
+                "rank": int(proposal.candidate.rank),
+                "param_count": int(proposal.candidate.param_count),
+                "capacity": int(proposal.budget.max_params),
+                "budget_n": int(proposal.budget.n_transitions),
+                "validation_n": int(n),
+                "validation_ticks": tuple(self._validation_ticks),
+                "candidate_mean": (
+                    self._validation_candidate_sum / n if n else None
+                ),
+                "base_mean": (
+                    self._validation_base_sum / n if n else None
+                ),
+                "decided": False,
+                "outcome": None,
+                "rejection": None,
+            }
+        if self.decisions:
+            decision = self.decisions[-1]
+            return {
+                "proposal_id": decision.proposal_id,
+                "proposal_tick": int(decision.proposal_tick),
+                "rank": int(decision.rank),
+                "param_count": int(decision.param_count),
+                "capacity": int(decision.capacity),
+                "budget_n": int(decision.budget_n),
+                "validation_n": int(decision.n),
+                "validation_ticks": decision.validation_ticks,
+                "candidate_mean": float(decision.candidate_mean),
+                "base_mean": float(decision.base_mean),
+                "decided": True,
+                "outcome": decision.outcome,
+                "rejection": (
+                    None if decision.outcome == "birth" else decision.outcome
+                ),
+            }
+        return {
+            "proposal_id": None,
+            "proposal_tick": None,
+            "rank": 0,
+            "param_count": 0,
+            "capacity": 0,
+            "budget_n": 0,
+            "validation_n": 0,
+            "validation_ticks": (),
+            "candidate_mean": None,
+            "base_mean": None,
+            "decided": False,
+            "outcome": None,
+            "rejection": None,
+        }
 
     # --------------------------------------------------------- overlay apply
     def _set_active_overlay(self, overlay_id: str | None) -> None:
+        if overlay_id is not None:
+            # A candidate cannot be validated against a patched predictor;
+            # activating any overlay drops a still-pending proposal.
+            self._proposal = None
         adapter = None if overlay_id is None else self.overlay_table.resolve(overlay_id)
         if overlay_id is not None and adapter is None:
             overlay_id = None
@@ -1617,12 +2026,31 @@ class PhysicsOrgan:
         return self._fit_overlay(motif, tick)
 
     def _fit_overlay(self, motif: StructuralMotif, tick: int) -> PredictorOverlay | None:
-        """Fit a predictor-only patch on the real cached post-motif residuals.
+        """Fit a capacity-bounded low-rank ``head.2`` patch on real evidence.
 
-        Fits on a deep copy of the base model; the base encoder and predictor
-        are never mutated.  Returns ``None`` when there is not enough data or
-        the loss is not finite / did not improve.
+        Round 9a (user decision 1): the stored patch scales with the
+        evidence.  A dense delta of the last head layer (weight + bias) is
+        fitted on the real transitions in the motif window using the
+        pre-registered replay path (40 AdamW steps, fixed seed), then
+        SVD-truncated to the rank the evidence budget admits (Eckart-Young)
+        and stored as factors ``u (D x r)``, ``v (H x r)`` and the bias
+        delta.  The dense delta is never stored and the norm / ``head.0`` /
+        GRU are untouched.
+
+        Fits on a deep copy of the base model; the base encoder and
+        predictor are never mutated.  Every refusal is recorded in
+        ``fit_history`` with a reason and the budget it was judged against:
+
+        * ``capacity`` -- ``patch="full"`` (the dense full-predictor patch)
+          or a budget whose admissible rank is < 1;
+        * ``no-evidence`` -- no real transitions in the window;
+        * ``no-improvement`` -- the stored low-rank patch does not improve
+          its own window.
         """
+        tick = int(tick)
+        head_layer = self.base_model.predictor.head[-1]
+        latent_dim = int(head_layer.weight.shape[0])
+        head_in = int(head_layer.weight.shape[1])
         lo = max(0, motif.first_tick - 1)
         sequences: list[tuple[torch.Tensor, torch.Tensor]] = []
         for stream in self._fit_stream_ids():
@@ -1645,27 +2073,62 @@ class PhysicsOrgan:
                 )
             )
         if not sequences:
+            self.last_budget = EvidenceBudget(
+                0, latent_dim=latent_dim, head_in=head_in
+            )
+            self._record_refusal("no-evidence", 0, self.last_budget)
             return None
         common = min(int(item[1].shape[0]) for item in sequences)
         if common <= lo:
+            self.last_budget = EvidenceBudget(
+                0, latent_dim=latent_dim, head_in=head_in
+            )
+            self._record_refusal("no-evidence", 0, self.last_budget)
             return None
         z_batch = torch.stack([item[0][: common + 1] for item in sequences], dim=0)
-        a_batch = torch.stack([item[1][:common] for item in sequences], dim=0)
+        a_batch = torch.stack([item[1][: common] for item in sequences], dim=0)
         foreground = slice(lo, common)
+        # N is the number of REAL evidence transitions the loss is computed
+        # on -- counted from the data, never the requested window or motif.
+        fit_transitions = int((common - lo) * len(sequences))
+        budget = EvidenceBudget(
+            fit_transitions, latent_dim=latent_dim, head_in=head_in
+        )
+        self.last_budget = budget
+
+        # Capacity gate BEFORE any fit or overlay: the admissible patch class
+        # is the capacity-bounded low-rank last-layer delta.
+        if self.patch == "full":
+            requested = int(
+                sum(parameter.numel() for parameter in self.base_model.predictor.parameters())
+            )
+            self._record_refusal(
+                "capacity",
+                fit_transitions,
+                budget,
+                patch="full",
+                requested_params=requested,
+                fit_streams=len(sequences),
+            )
+            return None
+        if budget.max_rank < 1:
+            self._record_refusal(
+                "capacity",
+                fit_transitions,
+                budget,
+                fit_streams=len(sequences),
+            )
+            return None
 
         model = copy.deepcopy(self.base_model)
         model.eval()
         for parameter in model.parameters():
             parameter.requires_grad_(False)
-        if self.patch == "head":
-            parameters = list(model.predictor.head.parameters()) + list(
-                model.predictor.norm.parameters()
-            )
-        else:
-            parameters = list(model.predictor.parameters())
-        for parameter in parameters:
+        head = model.predictor.head[-1]
+        trainable = list(head.parameters())
+        for parameter in trainable:
             parameter.requires_grad_(True)
-        optimizer = torch.optim.AdamW(parameters, lr=self.fit_lr, weight_decay=1e-4)
+        optimizer = torch.optim.AdamW(trainable, lr=self.fit_lr, weight_decay=1e-4)
         torch.manual_seed(self.fit_seed)
         with torch.no_grad():
             before = model.predict(z_batch, a_batch)
@@ -1677,37 +2140,54 @@ class PhysicsOrgan:
             prediction = model.predict(z_batch, a_batch)
             loss = (prediction[:, foreground] - z_batch[:, 1:][:, foreground]).pow(2).mean()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(parameters, 1.0)
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             optimizer.step()
+        base_head = self.base_model.predictor.head[-1]
+        delta_w = (head.weight.detach() - base_head.weight.detach()).float()
+        delta_b = (head.bias.detach() - base_head.bias.detach()).float()
+        rank = budget.max_rank
+        try:
+            u_full, s_full, vh_full = torch.linalg.svd(delta_w, full_matrices=False)
+        except RuntimeError:  # pragma: no cover - LAPACK failure is not expected
+            self._record_refusal(
+                "capacity", fit_transitions, budget, fit_streams=len(sequences)
+            )
+            return None
+        u = (u_full[:, :rank] * s_full[:rank]).contiguous()
+        v = vh_full[:rank, :].transpose(0, 1).contiguous()
+        self._overlay_serial += 1
+        candidate = PredictorOverlay(
+            overlay_id=f"ovr-{self._overlay_serial:02d}",
+            u=u,
+            v=v,
+            bias=delta_b.clone(),
+            fit_transitions=fit_transitions,
+            fit_streams=len(sequences),
+            loss_before=loss_before,
+            loss_after=float("nan"),
+            patch=self.patch,
+            capacity=budget.max_params,
+            budget_n=fit_transitions,
+        )
+        probe = copy.deepcopy(self.base_model)
+        probe.eval()
+        candidate.apply_to(probe)
         with torch.no_grad():
-            after = model.predict(z_batch, a_batch)
+            after = probe.predict(z_batch, a_batch)
             loss_after = float(
                 (after[:, foreground] - z_batch[:, 1:][:, foreground]).pow(2).mean()
             )
         if not np.isfinite(loss_before) or not np.isfinite(loss_after) or loss_after >= loss_before:
+            self._overlay_serial -= 1
+            self._record_refusal(
+                "no-improvement",
+                fit_transitions,
+                budget,
+                rank=rank,
+                fit_streams=len(sequences),
+            )
             return None
-        trainable_names = {
-            name for name, parameter in model.predictor.named_parameters() if parameter.requires_grad
-        }
-        base_parameters = dict(self.base_model.predictor.named_parameters())
-        deltas = {
-            name: (parameter.detach().clone() - base_parameters[name].detach())
-            for name, parameter in model.predictor.named_parameters()
-            if name in trainable_names
-        }
-        if not deltas:
-            return None
-        self._overlay_serial += 1
-        overlay = PredictorOverlay(
-            overlay_id=f"ovr-{self._overlay_serial:02d}",
-            deltas=deltas,
-            param_count=int(sum(delta.numel() for delta in deltas.values())),
-            fit_transitions=int((common - lo) * len(sequences)),
-            fit_streams=len(sequences),
-            loss_before=loss_before,
-            loss_after=loss_after,
-            patch=self.patch,
-        )
+        overlay = replace(candidate, loss_after=loss_after)
         self.fit_history.append(
             FitRecord(
                 overlay_id=overlay.overlay_id,
@@ -1718,9 +2198,63 @@ class PhysicsOrgan:
                 loss_before=overlay.loss_before,
                 loss_after=overlay.loss_after,
                 patch=overlay.patch,
+                rank=overlay.rank,
+                budget_n=fit_transitions,
+                budget_capacity=budget.capacity_params,
+                budget_max_params=budget.max_params,
             )
         )
         return overlay
+
+    def _record_refusal(
+        self,
+        reason: str,
+        n_transitions: int,
+        budget: EvidenceBudget | None,
+        *,
+        tick: int | None = None,
+        patch: str | None = None,
+        requested_params: int = 0,
+        rank: int = 0,
+        fit_streams: int = 0,
+    ) -> None:
+        """Record a refused fit attempt (never silent, Round 9a).
+
+        Refusals carry the evidence budget they were judged against, so the
+        cap is auditable from ``fit_history`` alone.
+        """
+        self.refusals.append(
+            {
+                "reason": str(reason),
+                "n_transitions": int(n_transitions),
+                "tick": None if tick is None else int(tick),
+                "patch": self.patch if patch is None else str(patch),
+                "requested_params": int(requested_params),
+                "max_rank": 0 if budget is None else int(budget.max_rank),
+                "max_params": 0 if budget is None else int(budget.max_params),
+                "capacity_params": (
+                    0.0 if budget is None else float(budget.capacity_params)
+                ),
+            }
+        )
+        self.fit_history.append(
+            FitRecord(
+                overlay_id="",
+                param_count=0,
+                nbytes=0,
+                fit_transitions=int(n_transitions),
+                fit_streams=int(fit_streams),
+                loss_before=float("nan"),
+                loss_after=float("nan"),
+                patch=self.patch if patch is None else str(patch),
+                rank=int(rank),
+                budget_n=int(n_transitions),
+                budget_capacity=0.0 if budget is None else float(budget.capacity_params),
+                budget_max_params=0 if budget is None else int(budget.max_params),
+                requested_params=int(requested_params),
+                reason=str(reason),
+            )
+        )
 
     def _fit_stream_ids(self) -> list[int]:
         if self.fit_streams is not None:

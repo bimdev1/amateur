@@ -9,22 +9,30 @@ This module is the thin adapter between the standalone physics organ
   one-way post-commit hook (Q1-A), and prunes the organ/store in step.  It
   never touches the schedule, stage order, or channel semantics.
 * :class:`PhysicsRun` drives a **single** physical stream through the
-  executor: E1 step -> observation -> digest -> ratchet -> derivation ->
-  arrivals -> write absorption.  The acceptance scenario is the phase-5
-  event (normal -> flip -> spike -> digest -> overlay -> flip back ->
-  stale -> evict) measured state-by-state.
+  executor: E1 step -> observation -> digest -> ratchet -> proposal ->
+  validation -> decision -> derivation -> arrivals -> write absorption.
+  The acceptance scenario is the phase-5 event (normal -> flip -> spike ->
+  digest -> proposal at 16 -> held-out validation on 17-18 -> birth or
+  rejection at 18 -> flip back -> stale -> evict) measured state-by-state.
 
-Two honesty constraints are encoded structurally:
+Three honesty constraints are encoded structurally:
 
 1. The executor acceptance fits from a **bounded same-stream replay**
    (the pre-registered default: the last 16 transitions of this stream, no
-   cross-stream bank data, no post-hoc variant selection).  A single-stream
-   fit is not guaranteed to improve forward surprise; the trace records the
-   measured before/after ratio and the acceptance summary reports it as
-   ``drop`` or ``no-drop`` instead of fabricating one.
+   cross-stream bank data, no post-hoc variant selection), and the Round 9a
+   **capacity bound** caps the stored patch at the rank the evidence admits
+   (rank 26 / 5,056 params / 20,224 B on this trace).  A single-stream fit
+   is not guaranteed to improve forward surprise; the candidate must pass a
+   held-out validation window before it is born, and the summary reports the
+   measured ratios (all-active and active-flipped) as measured, never a
+   fabricated drop.
 2. The D2 patch table is in memory only.  A resident record without a patch
    is an assertion, never a silent unpatched run; restart persistence is
    explicitly out of scope this round.
+3. Every pre-adoption decision is public: ``organ.decisions`` records both
+   outcomes with the measured means, and ``organ.rejections`` is the
+   test-readable rejection log.  A rejected candidate never reaches D2,
+   D4 or a prediction.
 """
 from __future__ import annotations
 
@@ -274,11 +282,15 @@ class PhysicsSource:
     def _gate(self, tick: int, board: Any) -> BiasPrimitive:
         """The real #22 ratchet gate's derived output (Q4).
 
-        A sedimented invariant requires a revalidated overlay that survived
-        an eviction cycle; this slice produces none, so the gate reports
-        ``blocked`` with confidence 0.  The zero-confidence body carries
-        provenance ``(22, emit_tick)`` like any write; the executor absorbs
-        it as a consumed no-op.
+        The organ's adapted-vs-base evidence decides: an active overlay whose
+        cumulative adapted surprise is strictly below base reports
+        ``ratchet-gate-passed`` with ``clamp(1 - adapted/base, 0, 1)``, and
+        the store sediments that body into D4.  No verdict, no active
+        overlay, non-finite values, ``base <= 0`` or ``adapted >= base``
+        report the zero-confidence ``ratchet-gate-blocked`` sentinel, which
+        the executor absorbs as a consumed no-op.  Round 9a: the registered
+        trace really passes on 11 active ticks (measured), so both branches
+        occur without any test double.
         """
         passed, confidence = self.organ.ratchet_gate_passed()
         if passed:
@@ -290,10 +302,13 @@ class PhysicsSource:
 
         Q1 atomicity: ``_absorb_writes`` commits the birth before the
         one-way ``on_commit`` attaches the patch, so a patch that violates
-        the byte ceilings must be refused here, in the derivation pass --
-        before any arrival, commit, or charge.  A full-predictor patch
-        (843,680 B) exceeds the per-patch ceiling; failing here leaves the
-        store and the organ clean instead of half-committed.
+        the outer byte ceilings must be refused here, in the derivation
+        pass -- before any arrival, commit, or charge.  The Round 9a
+        evidence bound is applied earlier, at fit time: only a
+        capacity-admissible low-rank patch can reach this hook.  The outer
+        ``MatBoard`` byte ceilings remain storage bounds and still fail
+        closed here (a synthetic oversized patch is refused before any
+        commit).
         """
         self._pending_births = [
             record
@@ -390,7 +405,15 @@ class PhysicsSource:
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class RunTick:
-    """One executor tick of the single-stream run (measured state)."""
+    """One executor tick of the single-stream run (measured state).
+
+    Round 9a adds the pre-adoption validation trace: ``proposal_tick`` /
+    ``proposal_rank`` / ``proposal_param_count`` / ``proposal_capacity``
+    describe the candidate, ``validation_n`` / ``candidate_mean`` /
+    ``base_mean`` its held-out evidence (``nan`` before the first validation
+    tick), and ``decision`` / ``rejection`` the resolved outcome (``None``
+    while the window is open).
+    """
 
     tick: int
     frame_tick: int
@@ -405,6 +428,16 @@ class RunTick:
     residents: tuple[str, ...]
     patch_bytes: int
     d4_size: int
+    proposal_tick: int | None
+    proposal_rank: int
+    proposal_param_count: int
+    proposal_capacity: int
+    validation_n: int
+    validation_ticks: tuple[int, ...]
+    candidate_mean: float | None
+    base_mean: float | None
+    decision: str | None
+    rejection: str | None
 
 
 @dataclass(frozen=True)
@@ -488,7 +521,13 @@ class PhysicsRun:
     def flip_gravity(self) -> int | dict[int, int]:
         return self.organ.flip_gravity()
 
-    def _should_adopt(self, observation: Observation) -> bool:
+    def _should_propose(self, observation: Observation) -> bool:
+        """Round 9a trigger: propose at the same point that used to adopt.
+
+        Proposal, not adoption: the candidate is fitted at this tick and
+        held for the pre-adoption validation window (Round 9a's binding
+        condition).  Trigger gating remains a 9b concern and is untouched.
+        """
         if not self.single_stream_adoption or self._fit_attempted:
             return False
         if self.organ.overlay_table.active():
@@ -517,12 +556,20 @@ class PhysicsRun:
         digest = self.organ.digest(observation)
         stales_before = len(self.organ.overlay_table.stales)
         ratchet = self.organ.ratchet(digest)
-        adoption: OverlayRecord | None = None
-        if self._should_adopt(observation):
+        rejections_before = len(self.organ.rejections)
+        if self._should_propose(observation):
             self._fit_attempted = True
-            adoption = self.organ.adopt_overlay_from_buffer(
+            self.organ.propose_overlay_from_buffer(
                 int(observation.tick), fit_window=self.fit_window
             )
+        # The decision is taken in the same executor tick that completes the
+        # validation window (frame ticks 17-18 for the proposal at 16), and
+        # after the ratchet has finalised the previous tick, so a just-born
+        # overlay cannot be revalidated before its #23 has even committed.
+        adoption: OverlayRecord | None = self.organ.resolve_proposal(
+            int(observation.tick)
+        )
+        state = self.organ.proposal_state()
         evictions_before = len(self.board.evictions)
         self.source.begin_tick(
             observation.frame,
@@ -539,6 +586,12 @@ class PhysicsRun:
         staled = None
         if len(self.organ.overlay_table.stales) > stales_before:
             staled = self.organ.overlay_table.stales[-1].overlay_id
+        if adoption is not None:
+            decision = "birth"
+        elif len(self.organ.rejections) > rejections_before:
+            decision = "interference"
+        else:
+            decision = None
         row = RunTick(
             tick=self.dry.tick_no,
             frame_tick=int(observation.tick),
@@ -553,6 +606,20 @@ class PhysicsRun:
             residents=tuple(rid for rid, _epoch in self.board.residents()),
             patch_bytes=self.board.patch_bytes(),
             d4_size=len(self.board.d4),
+            proposal_tick=state["proposal_tick"],
+            proposal_rank=int(state["rank"]),
+            proposal_param_count=int(state["param_count"]),
+            proposal_capacity=int(state["capacity"]),
+            validation_n=int(state["validation_n"]),
+            validation_ticks=tuple(state["validation_ticks"]),
+            candidate_mean=(
+                None if state["candidate_mean"] is None else float(state["candidate_mean"])
+            ),
+            base_mean=(
+                None if state["base_mean"] is None else float(state["base_mean"])
+            ),
+            decision=decision,
+            rejection=None if decision != "interference" else "interference",
         )
         self.ticks.append(row)
         return row
@@ -575,6 +642,18 @@ class PhysicsRun:
         if ticks < 1:
             raise ValueError("ticks must be >= 1")
         self.reset()
+        return self._drive(ticks, flip_at=flip_at, flip_back_at=flip_back_at)
+
+    def _drive(
+        self,
+        ticks: int,
+        *,
+        flip_at: int | None = None,
+        flip_back_at: int | None = None,
+    ) -> tuple[RunTick, ...]:
+        """The tick loop without the reset (``run`` / ``acceptance`` share it)."""
+        if ticks < 1:
+            raise ValueError("ticks must be >= 1")
         self._flip_at = flip_at
         self._flip_back_at = flip_back_at
         rows: list[RunTick] = []
@@ -600,16 +679,20 @@ class PhysicsRun:
         """Single-stream phase-5 acceptance: the measured state trace.
 
         Normal (``warmup``) -> flip -> ``post_flip`` -> flip back ->
-        ``recovery``.  The pre-registered single-stream adaptation policy is
-        used unchanged; the summary reports the measured adapted/base
-        forward ratio exactly as measured.
+        ``recovery``.  Round 9a's policy is used unchanged: the candidate is
+        proposed at the same trigger point, validated on the next two
+        held-out ticks, and born only if the validation passes.  The summary
+        reports the measured adapted/base ratios exactly as measured, both
+        over every active tick (the pre-registered definition) and over the
+        active *flipped* ticks (the failure window proper).
         """
+        self.reset()
         d4_before = pickle.dumps(self.board.d4, protocol=4)
         encoder_before = [
             parameter.detach().clone()
             for parameter in self.organ.base_model.encoder_parameters()
         ]
-        rows = self.run(
+        rows = self._drive(
             warmup + post_flip + recovery,
             flip_at=warmup,
             flip_back_at=warmup + post_flip,
@@ -658,13 +741,74 @@ class PhysicsRun:
             adapted_mean = float("nan")
             base_mean = float("nan")
             forward_ratio = float("nan")
+        # Secondary view: the active ticks that fall inside the *flipped*
+        # window proper.  The pre-registered `forward_ratio` above spans every
+        # active tick (including the flip-back ticks on which a passed patch
+        # goes stale); this one isolates the failure window the user's
+        # criterion names.  Both are reported, neither replaces the other.
+        active_flipped = [row for row in active if row.phase == "flipped"]
+        if active_flipped:
+            flip_adapted_mean = float(np.mean([row.surprise for row in active_flipped]))
+            flip_base_mean = float(np.mean([row.base_surprise for row in active_flipped]))
+            forward_ratio_flip_only = (
+                flip_adapted_mean / flip_base_mean if flip_base_mean else float("nan")
+            )
+        else:
+            flip_adapted_mean = float("nan")
+            flip_base_mean = float("nan")
+            forward_ratio_flip_only = float("nan")
         fit = self.organ.fit_history[-1] if self.organ.fit_history else None
+        decision = self.organ.decisions[-1] if self.organ.decisions else None
+        proposal = self.organ.proposals[-1] if self.organ.proposals else None
+        validation_ticks = () if decision is None else decision.validation_ticks
+        validation_candidate = (
+            None if decision is None else float(decision.candidate_mean)
+        )
+        validation_base = (
+            None if decision is None else float(decision.base_mean)
+        )
+        validation_ratio = (
+            validation_candidate / validation_base
+            if validation_candidate is not None
+            and validation_base is not None
+            and np.isfinite(validation_candidate)
+            and np.isfinite(validation_base)
+            and validation_base
+            else None
+        )
         summary = {
             "streams": 1,
             "normal_mean": normal_mean,
             "spike_peak": float(spike),
             "spike_over_normal": (
                 float(spike) / normal_mean if normal_mean else float("nan")
+            ),
+            "proposal_tick": None if proposal is None else proposal.proposal_tick,
+            "proposal_rank": None if proposal is None else proposal.candidate.rank,
+            "proposal_param_count": (
+                None if proposal is None else proposal.candidate.param_count
+            ),
+            "proposal_capacity": (
+                None if proposal is None else proposal.budget.max_params
+            ),
+            "proposal_budget_n": (
+                None if proposal is None else proposal.budget.n_transitions
+            ),
+            "validation_ticks": validation_ticks,
+            "validation_n": 0 if decision is None else decision.n,
+            "validation_candidate_mean": validation_candidate,
+            "validation_base_mean": validation_base,
+            "validation_ratio": validation_ratio,
+            "decision": None if decision is None else decision.outcome,
+            "rejection_tick": (
+                None
+                if decision is None or decision.outcome == "birth"
+                else decision.tick
+            ),
+            "rejection_reason": (
+                None
+                if decision is None or decision.outcome == "birth"
+                else decision.outcome
             ),
             "adoption_tick": adoption_frame,
             "stale_tick": (
@@ -680,6 +824,11 @@ class PhysicsRun:
             "adapted_mean": adapted_mean,
             "base_mean": base_mean,
             "forward_ratio": forward_ratio,
+            "active_flip_ticks": len(active_flipped),
+            "active_flip_adapted_mean": flip_adapted_mean,
+            "active_flip_base_mean": flip_base_mean,
+            "forward_ratio_flip_only": forward_ratio_flip_only,
+            "d4_sediments": len(self.board.d4),
             "direction": (
                 "drop" if np.isfinite(forward_ratio) and forward_ratio < 1.0
                 else ("no-drop" if np.isfinite(forward_ratio) else "no-overlay")
@@ -706,5 +855,20 @@ class PhysicsRun:
             "fit_nbytes": None if fit is None else fit.nbytes,
             "fit_loss_before": None if fit is None else fit.loss_before,
             "fit_loss_after": None if fit is None else fit.loss_after,
+            "fit_rank": None if fit is None else fit.rank,
+            "fit_budget_n": None if fit is None else fit.budget_n,
+            "fit_budget_capacity": None if fit is None else fit.budget_capacity,
+            "fit_reason": None if fit is None else fit.reason,
+            "refusals": tuple(self.organ.refusals),
+            "rejections": tuple(
+                {
+                    "tick": record.tick,
+                    "reason": record.reason,
+                    "candidate_mean": record.candidate_mean,
+                    "base_mean": record.base_mean,
+                    "n": record.n,
+                }
+                for record in self.organ.rejections
+            ),
         }
         return AcceptanceResult(ticks=rows, summary=summary)

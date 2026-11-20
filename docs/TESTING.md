@@ -146,7 +146,7 @@ flows to `derived`, so **11/26 derived** in physics mode:
 | 18 | emergent crystal residual | `EmergentCrystalBody` |
 | 19 | digested debris centroid | `DigestedDebrisBody` |
 | 21 | structural motif | `StructuralMotifBody` |
-| 22 | the real ratchet gate's output (confidence 0 in this slice) | `BiasPrimitive` |
+| 22 | the real ratchet gate's output (blocked = confidence 0; round 9a passes on real evidence) | `BiasPrimitive` |
 | 23/24 | organ birth / revalidation record | `MatOverlay` (unchanged) |
 
 Still placeholders in physics mode, by Lead decision: #1 (E2 gradient),
@@ -155,9 +155,11 @@ Still placeholders in physics mode, by Lead decision: #1 (E2 gradient),
 (#11/#14/#15) and D3 reads (#20/#26) remain placeholders: D1 is
 unimplemented and D3 is written but not read this round. The trigger-gated
 flows carry exact-type **no-op sentinels** on non-event ticks (`ovr-noop`,
-`debris-none`, `motif-none`, `none`), and #22 carries the Q4 confidence-0
-gate body; these are constants, not derived content, and are never
-retained in D2/D3/D4. The coverage ledger is plain test-only data — no
+`debris-none`, `motif-none`, `none`), and #22 carries the Q4 gate body
+(confidence 0 when blocked; round 9a's capacity-bounded patch passes on
+real evidence, so physics-mode #22 can carry a positive confidence and D4
+can sediment real invariants); the sentinels are constants, not derived
+content, and are never retained in D2/D3/D4. The coverage ledger is plain test-only data — no
 executor behaviour branches on it. See
 [phase4-5-design.md](phase4-5-design.md) §14.
 
@@ -253,11 +255,13 @@ How each user-supplied master invariant is currently verified:
 | INV-NO-OSSIFY | typed + proven (schedule explicit) + empirical | Lean `mat_fresh_policy`/`mat_fresh`, `mat_bounded_policy`/`mat_bounded`; `test_payloads` lifecycle/integration | enduring (statement); current proof policy-relative to the mat law, hypothesis explicit |
 | INV-EMPTINESS | typed by construction + proven | `MatOverlay`/`BiasPrimitive` exact-type whitelist; Lean `geometry_write_channel_purity`; `test_payloads` trajectory-rejection | enduring |
 | INV-PROVENANCE (round 8) | carrying + ordering closed, structural anti-mint checked; derivation **partial** | A2 `Envelope(Provenance(source_fid, tick_born), body)`; `require_channel_provenance`; `test_provenance` (48 tests incl. executor continuity); `test_payloads.TestEmissionProvenance`; coverage table above | enduring (statement); #2/#4/#5/#9/#13/#16 stay placeholders and D3 is not read yet |
-| INV-PATCH (round 8) | Python-asserted, **tested-not-proven** (Lean bounds records only) | `MatBoard` patch table keyed `overlay_id` (Q1-A): record and patch evict atomically on the capacity, byte-ceiling and organ paths; `MAX_PATCH_BYTES=262,144` per patch, `MAX_PATCH_TOTAL_BYTES=1,048,576` per table; `test_payloads.TestMatBoardPatches`, `test_physics_run.TestPatchAccounting` | physics epoch; substance bound not proved, patch map is in-memory (persistence absent) |
+| INV-PATCH (round 8; round 9a) | Python-asserted, **tested-not-proven** (Lean bounds records only) | `MatBoard` patch table keyed `overlay_id` (Q1-A): record and patch evict atomically on the capacity, byte-ceiling and organ paths; `MAX_PATCH_BYTES=262,144` per patch, `MAX_PATCH_TOTAL_BYTES=1,048,576` per table. Round 9a applies the evidence-derived bound **first**: `K ≤ 5·N·64` (`amateur/physics/capacity.py`), low-rank `head.2` patch `K(r)=192r+64`, 20,224 B at N=16 (rank 26); dense head+norm (34,240) and full (210,920) are inadmissible; `test_physics_capacity`, `test_physics_run.TestPatchAccounting` | physics epoch; substance bound not proved, patch map is in-memory (persistence absent) |
 | INV-SOURCE (round 8) | structural + tested (no silent fallback) | content-only `PayloadSource` (Q2-A); fixed `PLACEHOLDER_FLOWS` dispatch that never reads the ledger; `PhysicsSource.derive_body` raises before any arrival; a source failure leaves every charge counter at 0; `test_physics_run.TestSourceSelection`/`TestCoverageLedger`/`TestSourceFailureIsNotACharge` | enduring (contract); physics producer partial |
-| INV-ATOMIC (round 8) | tested (fail-closed) | record+patch atomicity on every path: capacity, byte ceiling, organ-driven evict, and the fail-closed full-patch path (asserted in the derivation pass before any arrival, no state change); `MatBoard` guard rails (validate-before-pop revalidation, duplicate-birth rejection, exactly-one `evict_record`); `test_payloads.TestMatBoardGuardRails`/`TestMatBoardPatches`, `test_physics_run.TestFullPatchModeFailsClosed` | enduring (Python); Lean bounds records only |
-| INV-RESET (round 8) | tested | `PhysicsOrgan.reset_p6_state()` clears decisions/pending/cooldown/gate evidence/overlay table/fit history; `PhysicsRun.reset()` calls it; two consecutive `acceptance()` runs are identical (`1.261383`, stale 19, evict 23, clean end state); `test_physics_run.TestResetRepeatability` | enduring (harness contract); needed for the registered trace to be repeatable |
-| INV-ZERO-CONF (round 8) | tested by serialized-bytes equality + identity B | #22 is the **derived** gate output (Q4-A): it passes only when an overlay is active and cumulative adapted < base evidence exists, confidence `clamp(1-adapted/base,0,1)`; production publishes evidence after `stale_patience` (2) applied ticks, disclosed; `_absorb_writes` consumes a confidence-0 write as a no-op (no D4 mutation, `1 = 1 + 0 + 0`); `test_physics_run.TestZeroConfidenceGate` (blocked by measured harm, injected pass, non-vacuous 121 B retention, same object, 35 absorbed no-ops) | physics epoch; the passing branch is exercised by **injected** evidence only — no real adaptation was beneficial over the patience window in this slice |
+| INV-ATOMIC (round 8; round 9a) | tested (fail-closed) | record+patch atomicity on every path: capacity, byte ceiling, organ-driven evict; round 9a refuses `patch="full"` at the capacity gate **before any fit/overlay**, and the outer byte-ceiling path is exercised with a synthetic oversized patch (asserted in the derivation pass before any arrival, no state change); `MatBoard` guard rails (validate-before-pop revalidation, duplicate-birth rejection, exactly-one `evict_record`); `test_payloads.TestMatBoardGuardRails`/`TestMatBoardPatches`, `test_physics_run.TestFullPatchModeFailsClosed` | enduring (Python); Lean bounds records only |
+| INV-CAPACITY (round 9a) | derivation + tests (arithmetic; not proved in Lean) | `K ≤ γ·N·D` with γ=5.0, N = real evidence transitions used, D=64 (`amateur/physics/capacity.py`); last-layer low-rank patch `K(r)=192r+64`, `r_max=min(floor((γND−D)/192),64)`, `nbytes=4K`; N=4 → rank 6 / K=1,216 / 4,864 B; N=16 → rank 26 / K=5,056 / 20,224 B; N≥64 → rank 64 / K=12,352 / 49,408 B; dense 34,240 and full 210,920 refused at every N; outer byte ceilings are storage bounds only; `test_physics_capacity` (11) | physics epoch; γ=5.0 is pre-registered design slack, not measured; not proved in Lean |
+| INV-VALIDATION (round 9a) | tested (state-based; no-peek asserted) | pre-adoption proposal at frame 16; paired candidate-vs-base validation on held-out ticks 17–18 of the same stream; birth only if `candidate_mean < base_mean` strictly, decision at 18; rejection record reason `interference` with both means; no birth/activation on reject; `test_physics_organ.TestPreAdoptionValidation`, `test_physics_run.TestPreAdoptionValidation` | physics epoch; `validation_window=2` == `stale_patience` (documented); one candidate at a time; trigger-gating (9b) not in scope |
+| INV-RESET (round 8; round 9a) | tested | `PhysicsOrgan.reset_p6_state()` clears decisions/pending/cooldown/gate evidence/overlay table/fit history; `PhysicsRun.reset()` calls it; two consecutive `acceptance()` runs are identical (round 9a: proposal 16, birth 18, stale 31, evict 35, all-active 1.0461437156029878, flip-only 0.9665724706513396, 11 D4 sediments, clean end state); `test_physics_run.TestResetRepeatability` | enduring (harness contract); needed for the registered trace to be repeatable |
+| INV-ZERO-CONF (round 8; round 9a) | tested by serialized-bytes equality + identity B | #22 is the **derived** gate output (Q4-A): it passes only when an overlay is active and cumulative adapted < base evidence exists, confidence `clamp(1-adapted/base,0,1)`; production publishes evidence after `stale_patience` (2) applied ticks, disclosed. Round 9a's capacity-bounded patch is genuinely beneficial while active, so the gate passes on **real** evidence: 11 real sediments (frames 21–31), 25 confidence-0 no-ops, `11+25=36`; the retained prefix is byte-identical and object-identical (no test double), and the gate blocks again after eviction. `test_physics_run.TestZeroConfidenceGate` (9 tests) | physics epoch; the passing branch is now real, not injected |
 | INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` | enduring |
 | INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` | plumbing-only in current form (inherits LIVENESS's cadence); enduring form follows the spine-scoped liveness |
 | INV-CENSUS | resolved (raw membership, adjudicated) | `test_recurrence` census: \|Cycles(D1)\|=7 (entangled hub), \|Cycles(D2)\|=4, \|Cycles(D3)\|=4, \|Cycles(D4)\|=3 with zero 2-/3-hop loops — D4's structural insulation | enduring (pure topology) |
@@ -378,9 +382,27 @@ the implemented behavior.
   worse)**; the organ flags it stale after two harmful ticks and evicts it.
   `test_physics_run.TestSingleStreamAcceptance.test_single_stream_surprise_drops`
   is an explicit `expectedFailure` — the assertion is kept strict, not
-  weakened into "no material harm". The positive measured result remains
-  the bank/held-out fit (0.690× on unseen episodes,
-  `tests/test_physics_organ.py`), which is *not* the executor flow.
+  weakened into "no material harm". The 0.690× bank/held-out fit reported
+  here belongs to the dense patch and is **withdrawn** in round 9a, which
+  re-measures it at 0.8226 under the admissible low-rank patch
+  ([phase4-5-design.md](phase4-5-design.md) §15.7).
+- **Round 9a — evidence-bounded capacity + pre-adoption validation
+  (MEASURED; acceptance wording OPEN):** the patch is now a
+  capacity-bounded low-rank `head.2` delta, `K ≤ 5·N·64` with N the real
+  evidence transitions, stored as factors (N=16 → rank 26 / 5,056 params /
+  20,224 B); the dense head+norm (34,240) and full (210,920) patches are
+  inadmissible at every N. The candidate is fitted at frame 16, validated
+  on paired held-out ticks 17–18 (0.133868 vs 0.147455, 0.9079), and born
+  at 18 only on a strict win; a rejection is a public `interference`
+  record with no birth/activation. Seed 7 passes and is later
+  staleness-evicted (stale 31, evict 35, end state empty); seed 0 is the
+  measured rejection trace (0.190908 vs 0.133875, 1.4260; no
+  D2/D4/activation). **Open:** over all active ticks the ratio is 1.0461
+  (> 1.0, so `test_single_stream_surprise_drops` stays a strict
+  `expectedFailure`); over the active *flipped* ticks — the literal
+  "active flip window" — it is 0.9666 (< 1.0). Both are recorded; the
+  registered metric was not switched after seeing the result.
+  `test_physics_capacity` (11) + the updated organ/run suites.
 - **Overflow semantics (round 7, ADJUDICATED — reject-with-charge):**
   each mailbox has capacity 1. Acceptance is first-arrival-wins with
   ledger order as tie-break — deterministic, stateless, pointwise. A
@@ -446,6 +468,48 @@ exercised only by injected evidence, never by a real beneficial adaptation
 in this slice. Open limitations: #2, D1/D3 reads, patch persistence, and
 trigger-gating; full list in
 [phase4-5-design.md](phase4-5-design.md) §14.9.
+
+## Round 9a physics-mode acceptance record (measured)
+
+Protocol: one executor stream (`PhysicsRun`, seed 7), 8 normal ticks,
+gravity flip, 20 post-flip ticks, flip back, 8 recovery ticks. The
+capacity-bounded candidate is fitted at frame 16 (16 real same-stream
+transitions), validated on frames 17–18, and born at the decision tick 18
+only if the paired held-out candidate mean is strictly below the base mean.
+No cross-stream bank data is used in the executor; no post-hoc fit-variant
+or seed selection was made for the registered trace.
+
+| Item | Measured |
+| --- | --- |
+| capacity bound | `K ≤ 5·N·64`; N=16 → 5,120 capacity, rank 26, 5,056 params, 20,224 B |
+| dense patches | head+norm 34,240 and full 210,920: inadmissible at every N |
+| proposal / validation | frame 16 / frames 17–18 (paired candidate vs base) |
+| candidate vs base, validation | 0.13386843726038933 vs 0.1474553719162941 → **0.9078573097790045** |
+| decision / birth | **birth** at frame 18 (strict pass) |
+| active ticks | 14 (frames 19–32) |
+| adapted / base, active **flipped** ticks (19–27) | 0.25469933084115787 / 0.2635077436765035 = **0.9665724706513396** |
+| adapted / base, **all** active ticks | 0.3444968502626556 / 0.3293016486402069 = **1.0461437156029878** |
+| adapted / base, active recovered ticks (28–32) | 0.5061323852213514 / 0.44773067757487295 = **1.1304393702991506** |
+| stale / evict | finalized tick 31 / executor tick 35 (record+patch together) |
+| end state | D2 residents and patches `()`, patch bytes 0 |
+| D4 | 11 real gate sediments (frames 21–31), 25 confidence-0 no-ops; retained prefix byte-identical and object-identical (no test double) |
+| encoder | bit-identical after the fit (`torch.equal`) |
+| rejection trace (seed 0) | validations 17–18: 0.19090842455625534 vs 0.13387499749660492 = **1.4260200046771003**; `interference` at 18; no birth/activation; D2 empty, patch bytes 0; D4 byte-identical |
+| reassessed bank fit | 0.8225682511949177 (old 0.690× quarantined: dense-patch artifact) |
+| suite / Lean | 312 tests, OK (1 expected failure); `gen_lean` byte-identical |
+
+Honest reading: the validation gate passes on the registered trace and the
+organ's stale/evict rule removes the patch on the flip-back harm — the
+"stale/evict on a failure trace" requirement is met by the real trace. The
+acceptance criterion's wording is now material: the literal "active flip
+window" reading is 0.9666 (< 1.0), while the previously registered
+all-active reading is 1.0461 (> 1.0). The strict `expectedFailure` is kept
+on the registered all-active metric until the user adjudicates; selecting
+another seed after seeing the result would be seed-shopping and was not
+done (13 of the first 31 seeds reject, 18 birth; the rejection test uses
+seed 0, the first natural seed, not a re-registered acceptance). Full
+derivation, per-tick trace and honesty notes in
+[phase4-5-design.md](phase4-5-design.md) §15.
 
 ## What each layer catches that the others cannot
 
