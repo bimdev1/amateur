@@ -6,9 +6,21 @@ D2 writes (#23, #24) carry epoch-stamped overlays, D4 writes (#22) carry
 bias primitives — INV-EMPTINESS holds by construction. Every other
 payload stays a placeholder until physics. The driving gradient (#1, #3)
 and the geometry echoes (#7, #8, #11, #14, #15, #20, #25, #26) are
-injected every tick; read-consumes expect data (a miss is counted), store
+injected every tick; read-consumes expect data (a deficit charge), store
 absorbs are best-effort; the two in-tick cycles (#10 Resolved Trajectory,
 #17 Collapse Mandate) are one-tick-delayed mailboxes.
+
+Channel semantics (user-adjudicated): reject-with-charge at capacity-1
+mailboxes. An arrival into an empty box is accepted; an arrival onto a
+non-empty box is refused: the event object is discarded at the channel
+and a scalar excess charge is recorded (refusals are never retained as
+events, never logged as payloads, never replayable). Acceptance is
+first-arrival-wins with ledger order as tie-break: injections and stage
+emissions proceed in ascending fid within their phase, in spine order.
+Deficit (expected, absent) and excess (arrived, refused) charges are
+distinct kinds with separate counters; they are never summed. The two
+per-tick identities: attempted = accepted + refused, and accepted =
+consumed + delta-sunk + delta-depth.
 
 Cadence honesty: the uniform per-tick emission schedule and the one-#22
 /one-#23-per-tick geometry writes are plumbing, not design — the always-on
@@ -28,6 +40,7 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from dataclasses import dataclass
+from typing import Mapping, NamedTuple
 
 from .events import FlowEvent, carrier_for
 from .ledger import E1, E2, FLOW_LEDGER, STORES
@@ -105,21 +118,60 @@ CYCLE_FLOWS: tuple[int, ...] = tuple(
 )
 
 
-def step_flow(fid: int, box: int) -> tuple[int, int, int]:
-    """Pure step of one flow's mailbox. Returns (box', missed_delta, sunk_delta)."""
-    missed = sunk = 0
+class FlowDelta(NamedTuple):
+    """One flow's channel after one scalar tick.
+
+    INV-BOUNDS (intra-tick, adjudicated): `box <= 1` whenever the
+    incoming depth is -- the arrival op refuses onto a full box, so no
+    event sequence can push the depth past one.
+    """
+
+    box: int
+    miss: int
+    refused: int
+    sunk: int
+    accepted: int
+    consumed: int
+
+
+def step_flow(fid: int, box: int) -> FlowDelta:
+    """Pure step of one flow's channel (reject-with-charge semantics)."""
+    miss = refused = sunk = accepted = consumed = 0
     for op in FLOW_OPS[fid]:
         if op == "emit":
-            box += 1
+            if box == 0:
+                box, accepted = 1, accepted + 1
+            else:
+                refused += 1
         elif op in ("consume", "absorb"):
             if box > 0:
-                box -= 1
+                box, consumed = box - 1, consumed + 1
             else:
-                missed += 1
+                miss += 1
         else:
-            sunk += box
-            box = 0
-    return box, missed, sunk
+            sunk, box = sunk + box, 0
+    return FlowDelta(box, miss, refused, sunk, accepted, consumed)
+
+
+def prefix_depth(fid: int, box: int, n: int) -> int:
+    """Depth after the first n ops of the word -- one event boundary.
+
+    The Python mirror of the Lean `fold_box_bounded` theorem: for a
+    compliant incoming depth, every prefix -- hence every event boundary
+    within the tick -- keeps the depth at most one.
+    """
+    if not 0 <= n <= len(FLOW_OPS[fid]):
+        raise ValueError(f"prefix length {n} out of range for #{fid}")
+    depth = box
+    for op in FLOW_OPS[fid][:n]:
+        if op == "emit":
+            depth = 1 if depth == 0 else depth
+        elif op in ("consume", "absorb"):
+            if depth > 0:
+                depth -= 1
+        else:
+            depth = 0
+    return depth
 
 
 _BIAS_STEPS = (0.4, 0.6, 0.8)
@@ -153,7 +205,9 @@ def _payload_for(fid: int, tick: int, board: MatBoard) -> object:
 
 @dataclass(frozen=True)
 class TickStat:
-    emitted: dict[int, int]
+    attempted: dict[int, int]
+    accepted: dict[int, int]
+    refused: dict[int, int]
     consumed: dict[int, int]
     sunk: dict[int, int]
     missed: dict[int, int]
@@ -162,7 +216,9 @@ class TickStat:
 @dataclass
 class Report:
     ticks: int
-    emitted: dict[int, int]
+    attempted: dict[int, int]
+    accepted: dict[int, int]
+    refused: dict[int, int]
     consumed: dict[int, int]
     missed: dict[int, int]
     sunk: dict[int, int]
@@ -179,24 +235,53 @@ class DryRun:
         self.board = MatBoard()
         self.emissions: list[tuple[int, int, object]] = []
         self._tick_no = 0
-        self.emitted: Counter[int] = Counter()
+        self.attempted: Counter[int] = Counter()
+        self.accepted: Counter[int] = Counter()
+        self.refused: Counter[int] = Counter()
         self.consumed: Counter[int] = Counter()
         self.missed: Counter[int] = Counter()
         self.sunk: Counter[int] = Counter()
+        self.max_depth: Counter[int] = Counter()
 
-    def _emit(self, fid: int) -> None:
+    def _touch(self, fid: int) -> None:
+        depth = len(self.mailboxes[fid])
+        if depth > self.max_depth[fid]:
+            self.max_depth[fid] = depth
+
+    def _arrive(self, fid: int, *, copies: int = 1) -> None:
+        """Reject-with-charge arrival at a capacity-1 channel (adjudicated).
+
+        First arrival in stage order wins; ledger order is the tie-break
+        (callers proceed in ascending fid within their phase). A refused
+        copy is discarded here -- the event object never materializes, no
+        payload is minted -- and leaves a scalar excess charge, distinct
+        from the miss (deficit) charge and never summed with it. O(1)
+        per copy, exactly like a sink.
+        """
+        if copies < 1:
+            raise ValueError(
+                "starvation (k = 0) is deferred to the physics epoch"
+            )
         carrier = carrier_for(fid)
-        payload = _payload_for(fid, self._tick_no, self.board)
-        require_payload(fid, payload)
-        self.mailboxes[fid].append(carrier(payload=payload))
-        self.emissions.append((self._tick_no, fid, payload))
-        self.emitted[fid] += 1
+        for _ in range(copies):
+            box = self.mailboxes[fid]
+            self.attempted[fid] += 1
+            if box:
+                self.refused[fid] += 1
+                continue
+            payload = _payload_for(fid, self._tick_no, self.board)
+            require_payload(fid, payload)
+            box.append(carrier(payload=payload))
+            self.emissions.append((self._tick_no, fid, payload))
+            self.accepted[fid] += 1
+            self._touch(fid)
 
     def _consume(self, fid: int, *, silent: bool = False) -> None:
         box = self.mailboxes[fid]
         if box:
             box.popleft()
             self.consumed[fid] += 1
+            self._touch(fid)
         elif not silent:
             self.missed[fid] += 1
 
@@ -225,15 +310,30 @@ class DryRun:
             self.sunk[fid] += len(box)
             box.clear()
 
-    def tick(self) -> None:
+    def tick(self, injections: Mapping[int, int] | None = None) -> None:
+        """One tick: injections (with adversarial multiplicity), spine,
+        write absorption, sink drain.
+
+        `injections[fid] = k` overrides that flow's canonical single
+        arrival with k arrival attempts (k >= 1; starvation k = 0 is
+        deferred to the physics epoch). All arrivals proceed in ledger
+        fid order; later arrivals onto a full box are refused.
+        """
         self._tick_no += 1
-        for fid in PER_TICK_INJECTIONS:
-            self._emit(fid)
+        boosts = dict(injections or {})
+        unknown = sorted(set(boosts) - set(self.mailboxes))
+        if unknown:
+            raise KeyError(f"unknown flow ids: {unknown}")
+        plan = {fid: boosts.pop(fid, 1) for fid in PER_TICK_INJECTIONS}
+        for fid, k in sorted(boosts.items()):
+            plan[fid] = k
+        for fid in sorted(plan):
+            self._arrive(fid, copies=plan[fid])
         for stage in SPINE:
             for fid in stage.consumes:
                 self._consume(fid)
             for fid in stage.emits:
-                self._emit(fid)
+                self._arrive(fid)
         self._absorb_writes()
         self._drain_sinks()
 
@@ -243,7 +343,9 @@ class DryRun:
         history: list[TickStat] = []
         for _ in range(ticks):
             before = (
-                Counter(self.emitted),
+                Counter(self.attempted),
+                Counter(self.accepted),
+                Counter(self.refused),
                 Counter(self.consumed),
                 Counter(self.sunk),
                 Counter(self.missed),
@@ -251,15 +353,19 @@ class DryRun:
             self.tick()
             history.append(
                 TickStat(
-                    emitted=dict(self.emitted - before[0]),
-                    consumed=dict(self.consumed - before[1]),
-                    sunk=dict(self.sunk - before[2]),
-                    missed=dict(self.missed - before[3]),
+                    attempted=dict(self.attempted - before[0]),
+                    accepted=dict(self.accepted - before[1]),
+                    refused=dict(self.refused - before[2]),
+                    consumed=dict(self.consumed - before[3]),
+                    sunk=dict(self.sunk - before[4]),
+                    missed=dict(self.missed - before[5]),
                 )
             )
         return Report(
             ticks=ticks,
-            emitted=dict(self.emitted),
+            attempted=dict(self.attempted),
+            accepted=dict(self.accepted),
+            refused=dict(self.refused),
             consumed=dict(self.consumed),
             missed=dict(self.missed),
             sunk=dict(self.sunk),
@@ -283,16 +389,20 @@ def main(argv: list[str] | None = None) -> None:
     report = run.run(ticks)
     labels = {f.fid: f.flow for f in FLOW_LEDGER}
     print(f"dry run: {ticks} ticks, {len(FLOW_LEDGER)} flows")
-    print(f"{'#':>3}  {'flow':<38} {'emitted':>7} {'consumed':>8} {'missed':>7}")
+    print(
+        f"{'#':>3}  {'flow':<38} {'accepted':>8} {'refused':>8} "
+        f"{'consumed':>8} {'missed':>7}"
+    )
     for fid in sorted(labels):
         print(
             f"{fid:>3}  {labels[fid]:<38} "
-            f"{report.emitted.get(fid, 0):>7} "
+            f"{report.accepted.get(fid, 0):>8} "
+            f"{report.refused.get(fid, 0):>8} "
             f"{report.consumed.get(fid, 0):>8} "
             f"{report.missed.get(fid, 0):>7}"
         )
     print("sink drain:", {labels[k]: v for k, v in sorted(report.sunk.items())})
-    live = all(report.emitted.get(fid) == ticks for fid in labels)
+    live = all(report.accepted.get(fid) == ticks for fid in labels)
     print("liveness (every flow, every tick):", live)
     transit = {labels[fid]: n for fid, n in sorted(run.in_transit().items())}
     print("in transit:", transit)

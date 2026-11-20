@@ -13,6 +13,10 @@ from amateur.dryrun import (
 from amateur.ledger import FLOW_LEDGER
 
 
+def run_max_depth_max(run: DryRun) -> int:
+    return max(run.max_depth.values())
+
+
 class TestSpineConsistency(unittest.TestCase):
     def test_spine_covers_every_flow_exactly_once(self) -> None:
         stage_emits = [fid for stage in SPINE for fid in stage.emits]
@@ -53,7 +57,16 @@ class TestDryRun(unittest.TestCase):
     def test_every_flow_traversed_every_tick(self) -> None:
         report = DryRun().run(8)
         for fid in (f.fid for f in FLOW_LEDGER):
-            self.assertEqual(report.emitted.get(fid, 0), 8, msg=f"flow #{fid} starved")
+            self.assertEqual(
+                report.accepted.get(fid, 0), 8, msg=f"flow #{fid} starved"
+            )
+            self.assertEqual(
+                report.attempted.get(fid, 0), 8, msg=f"flow #{fid} unattempted"
+            )
+            self.assertEqual(
+                report.refused.get(fid, 0), 0,
+                msg=f"canonical schedule refuses #{fid}",
+            )
 
     def test_first_tick_misses_are_exactly_the_cycles(self) -> None:
         report = DryRun().run(8)
@@ -70,10 +83,21 @@ class TestDryRun(unittest.TestCase):
         self.assertEqual(transit, {10, 17})
 
     def test_deadlock_free_and_bounded_over_many_ticks(self) -> None:
-        report = DryRun().run(200)
-        self.assertEqual(sum(report.emitted.values()), 200 * len(FLOW_LEDGER))
+        run = DryRun()
+        report = run.run(200)
+        self.assertEqual(sum(report.accepted.values()), 200 * len(FLOW_LEDGER))
+        self.assertEqual(sum(report.refused.values()), 0)
+        self.assertEqual(run_max_depth_max(run), 1)
         for fid, n in report.missed.items():
             self.assertEqual(n, 1, msg=f"misses grow for #{fid}")
+
+    def test_starvation_and_unknown_flow_rejected(self) -> None:
+        run = DryRun()
+        run.tick()
+        with self.assertRaises(ValueError):
+            run.tick(injections={1: 0})
+        with self.assertRaises(KeyError):
+            run.tick(injections={99: 2})
 
     def test_rejects_non_positive_ticks(self) -> None:
         for bad in (0, -3):

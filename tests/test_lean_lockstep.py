@@ -45,14 +45,23 @@ def parse_ops_of(text: str) -> dict[int, tuple[str, ...]]:
     return arms
 
 
-def step(ops: tuple[str, ...], box: int) -> tuple[int, int, int]:
-    missed = sunk = 0
+def step(ops: tuple[str, ...], box: int) -> tuple[int, int, int, int, int, int]:
+    """Executor-free replay of the reject-with-charge channel semantics.
+
+    Returns (box, missed, refused, sunk, accepted, consumed) -- the same
+    accounting as amateur.dryrun.step_flow, re-implemented here over the
+    parsed Lean table only.
+    """
+    missed = refused = sunk = accepted = consumed = 0
     for op in ops:
         if op == "emit":
-            box += 1
+            if box == 0:
+                box, accepted = 1, accepted + 1
+            else:
+                refused += 1
         elif op == "consume":
             if box > 0:
-                box -= 1
+                box, consumed = box - 1, consumed + 1
             else:
                 missed += 1
         elif op == "sink":
@@ -60,7 +69,7 @@ def step(ops: tuple[str, ...], box: int) -> tuple[int, int, int]:
             box = 0
         else:
             raise ValueError(f"unknown op word {op!r}")
-    return box, missed, sunk
+    return box, missed, refused, sunk, accepted, consumed
 
 
 class TestTableParity(unittest.TestCase):
@@ -114,12 +123,28 @@ class TestTableParity(unittest.TestCase):
     def test_scalar_replay_from_parsed_lean_table(self) -> None:
         boxes = {fid: 0 for fid in self.arms}
         missed: Counter[int] = Counter()
+        refused: Counter[int] = Counter()
         sunk: Counter[int] = Counter()
+        accepted: Counter[int] = Counter()
         for tick in range(1, 65):
             for fid, ops in self.arms.items():
-                boxes[fid], missed_delta, sunk_delta = step(ops, boxes[fid])
+                (
+                    boxes[fid],
+                    missed_delta,
+                    refused_delta,
+                    sunk_delta,
+                    accepted_delta,
+                    _consumed,
+                ) = step(ops, boxes[fid])
                 missed[fid] += missed_delta
+                refused[fid] += refused_delta
                 sunk[fid] += sunk_delta
+                accepted[fid] += accepted_delta
+                self.assertEqual(
+                    accepted_delta + refused_delta,
+                    ops.count("emit"),
+                    msg=f"tick {tick}: identity A at #{fid}",
+                )
             self.assertTrue(
                 all(depth <= 1 for depth in boxes.values()),
                 msg=f"tick {tick}: box overflow",
@@ -133,6 +158,11 @@ class TestTableParity(unittest.TestCase):
                 {fid: n for fid, n in missed.items() if n},
                 {10: 1, 17: 1},
                 msg=f"tick {tick}: miss profile",
+            )
+            self.assertEqual(
+                {fid: n for fid, n in refused.items() if n},
+                {},
+                msg=f"tick {tick}: canonical refusal",
             )
             expected_sunk = {fid: tick for fid in SINK_FLOWS}
             self.assertEqual(
@@ -161,12 +191,27 @@ class TestLeanCompiles(unittest.TestCase):
             "boxes_bounded",
             "boxes_master",
             "misses_master",
+            "refused_master",
             "sunk_master",
-            "applyOp_step",
-            "fold_balance",
-            "flow_balance",
+            "applyOp_attempt",
+            "fold_attempt",
+            "applyOp_event",
+            "fold_event",
+            "fold_append",
+            "fold_box_bounded",
+            "step_contraction",
+            "emit_full_box",
+            "emit_empty_box",
+            "cycle_warm_no_refusal",
+            "cycle_burst_refuses_extras",
+            "flow_attempts_raw",
+            "flow_take_raw",
+            "flow_event",
             "emit_liveness",
             "consume_sink_split",
+            "step_used",
+            "step_consumed",
+            "attempts_at_master",
             "balance_at_master",
             "geometry_write_channel_purity",
             "geometry_writes_anchored",
@@ -179,6 +224,19 @@ class TestLeanCompiles(unittest.TestCase):
             "mat_bounded",
         ):
             self.assertRegex(text, rf"\btheorem {name}\b")
+
+    def test_cycle_ordering_is_an_explicit_theorem_hypothesis(self) -> None:
+        for name in (
+            "cycle_warm_no_refusal",
+            "cycle_burst_refuses_extras",
+        ):
+            head = FORMAL.read_text().split(f"theorem {name}", 1)[1]
+            body = head.split(":= by", 1)[0]
+            self.assertIn(
+                "opsOf i = [Op.consume, Op.emit]",
+                body,
+                msg=f"{name}: ordering assumption must be stated",
+            )
 
     def test_mat_theorems_carry_explicit_schedule_hypotheses(self) -> None:
         """Cadence audit: the mat theorems quantify over every stream

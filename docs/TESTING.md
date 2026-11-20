@@ -70,18 +70,32 @@ lifecycle, and 200-tick executor integration (no trajectory ever reaches D4;
 Because each flow's mailbox sees only its own op word, the whole executor
 reduces to a per-flow recurrence. `step_flow(fid, box)` is that pure step;
 the Lean file is generated from the same table and proves its long-run
-shape for *all* ticks, not just sampled ones:
+shape for *all* ticks, not just sampled ones. The channel semantics are
+the round-7 adjudicated ones (capacity one, first-arrival-wins,
+reject-with-charge; deficits and excesses are distinct scalar charges,
+never summed):
 
 | Theorem | Statement | Cadence |
 | --- | --- | --- |
-| `boxes_bounded` | every mailbox depth <= 1 at every tick | under the dry-run op table (plumbing cadence) |
+| `boxes_bounded` | every mailbox depth <= 1 at every tick boundary (cold start) | tick-induction over the dry-run op table (plumbing cadence) |
 | `boxes_master`  | for `t >= 1`, depth profile is exactly `{10: 1, 17: 1}`, zero elsewhere |
 | `misses_master` | cumulative misses are exactly one on each cycle, frozen after tick 1 |
 | `sunk_master`   | `sIter t i = t` for the sinks (#2, #4, #5), 0 elsewhere |
-| `applyOp_step` / `fold_balance` / `flow_balance` | per-flow conservation: box' + sunk' + attempted consumes is fixed by the word's emit weight |
+| `refused_master` | cumulative refusals are exactly zero for all ticks >= 1 under the canonical schedule | schedule-pinned (plumbing cadence) |
+| `fold_attempt` / `applyOp_attempt` | identity A, word-generic over any op sequence: refused + used grows by exactly the word's emit weight (`attempted = accepted + refused`), event by event | cadence-free (enduring) |
+| `fold_take` / `applyOp_take` | word-generic: consumed + miss grows by the word's consume weight; a consume on an empty box is a miss and removes nothing | cadence-free (enduring) |
+| `fold_event` / `applyOp_event` | identity B, word-generic: accepted (`used`) = consumed + sunk + delta-depth, carried through every event; refused copies never enter | cadence-free (enduring) |
+| `fold_append` | folds compose over concatenated words (`flowFold (l1 ++ l2) st = flowFold l2 (flowFold l1 st)`) | cadence-free (enduring) |
+| `fold_box_bounded` / `step_contraction` | INV-BOUNDS intra-tick (adjudicated): from any depth <= 1, depth <= 1 after *every prefix* of the event sequence | cadence-free (enduring) |
+| `emit_full_box` | multiplicity k onto a full box: the held event stays, all k extra copies refused as scalar charges, nothing buffered | cadence-free (enduring) |
+| `emit_empty_box` | multiplicity k + 1 onto an empty box: first arrival accepted, k refused | cadence-free (enduring) |
+| `cycle_warm_no_refusal` | cycle check pinned as a lemma: with the ordering hypothesis `opsOf i = [Op.consume, Op.emit]` lifted explicitly, consume empties the delay box before emit refills it -- refusal never fires on #10/#17 | policy-relative, ordering hypothesis explicit |
+| `cycle_burst_refuses_extras` | burst of k + 1 copies on a cycle flow, then its word: depth restored to 1, refusals grown by exactly k -- extras refused, nothing hovering | policy-relative, ordering hypothesis explicit |
+| `flow_attempts_raw` / `flow_take_raw` / `flow_event` | identities A/B and the take-split instantiated per flow per tick from the cold start | cadence-free (enduring) |
 | `emit_liveness` | per-op table: every flow's word emits exactly once (fids 1..26) |
 | `consume_sink_split` | per-op table: every flow either consumes once or is a sink (fids 1..26) |
-| `balance_at_master` | at the master profile, box' + sunk' + consumes = fbox i + 1 per flow |
+| `attempts_at_master` | identity A at the master profile: attempted = accepted = 1, refused = 0, per flow | schedule-pinned at the master profile |
+| `balance_at_master` | identity B at the master profile: accepted = consumed + sunk + depth, per flow per tick (delta-depth = box' - fbox i) | schedule-pinned at the master profile |
 | `geometry_write_channel_purity` | the payload kinds excluded from geometry (trajectory, delta, context) are absent from *both* D2 and D4 channel allow-lists | type-level, cadence-free (enduring) |
 | `geometry_writes_anchored` | D4 writes are exactly flow #22 and D2 writes exactly {#23, #24}, all ratchet (6.0) consume ops | topology-level, cadence-free (enduring) |
 | `matTick_length` | one matTick step preserves the capacity bound (given a compliant board) | step law, cadence-free (enduring) |
@@ -115,8 +129,17 @@ A proof about the minter is not a proof about the board. Classification:
   (#22/#23/#24) become trigger-gated, these are re-derived against the
   new table — the generator makes that a regeneration, not a rewrite.
 - **Cadence-free (enduring):** `geometry_write_channel_purity`,
-  `geometry_writes_anchored`, `matTick_length`, and the conservation
-  shape per op word (`applyOp_step`, `fold_balance`, `flow_balance`).
+  `geometry_writes_anchored`, `matTick_length`, and the word-generic
+  lemmas (`applyOp_attempt`, `fold_attempt`, `applyOp_take`,
+  `fold_take`, `applyOp_event`, `fold_event`, `fold_append`,
+  `fold_box_bounded`, `step_contraction`, `emit_full_box`,
+  `emit_empty_box`, `flow_attempts_raw`, `flow_take_raw`,
+  `flow_event`). The cycle check and the master-profile identities are
+  deliberately *not* here: `cycle_warm_no_refusal` and
+  `cycle_burst_refuses_extras` quantify under the explicit ordering
+  hypothesis `opsOf i = [Op.consume, Op.emit]`, and
+  `attempts_at_master` / `balance_at_master` are pinned to the master
+  profile.
 
 ## Master invariant matrix (INV-*)
 
@@ -124,10 +147,10 @@ How each user-supplied master invariant is currently verified:
 
 | INV-id | Status | Where | Epoch |
 | --- | --- | --- | --- |
-| INV-BOUNDS | cold-start proven | Lean `boxes_bounded`; adversarial robustness = round-7 scope | enduring |
+| INV-BOUNDS | proven intra-tick (adjudicated round 7) + fuzzed | Lean `fold_box_bounded`/`step_contraction` (depth <= 1 after every event prefix), `boxes_bounded` (tick boundaries); Python `prefix_depth` tests, the executor `max_depth` event-boundary monitor, and the fuzz sweep | enduring |
 | INV-LIVENESS | proven + empirical + structural **in its current per-flow, per-tick form** | Lean `emit_liveness`; `test_invariants.TestLiveness` | plumbing-only; enduring form: liveness scoped to the always-on spine, #22/#23/#24 trigger-gated in the physics epoch |
-| INV-CYCLE-DELAY | proven | Lean `boxes_master` | plumbing-only (the depth profile is schedule-relative; the two delayed cycles themselves are design) |
-| INV-CONSERVE | proven per-flow + empirical system-wide | Lean `flow_balance`, `balance_at_master`; `test_accounting` identity | enduring (round-7 overflow semantics must preserve it) |
+| INV-CYCLE-DELAY | proven + cycle check pinned | Lean `boxes_master`; the cycle check stands as `cycle_warm_no_refusal` (ordering hypothesis explicit) and `cycle_burst_refuses_extras` (extras refused, nothing hovering) | plumbing-only (the depth profile is schedule-relative; the two delayed cycles themselves are design) |
+| INV-CONSERVE | two exact identities per flow per tick, proven word-generically + empirical | Lean `fold_attempt`/`fold_event` (any op sequence), `attempts_at_master`/`balance_at_master`; `test_accounting` identities A/B; overflow preserves both verbatim under reject-with-charge | enduring |
 | INV-EXHAUST | proven | Lean `sunk_master` | plumbing-only (linear growth = per-tick schedule) |
 | INV-CAUSAL | structural | `test_invariants.TestCausal` | enduring |
 | INV-GEOMETRY | adjudicated two-tier reading: structural (writer sets) + proven (type-system purity) | `test_invariants.TestGeometry`; Lean `geometry_write_channel_purity`, `geometry_writes_anchored`; D2/D4 are the parametric geometry written only by 6.0, D1/D3 operational by design | enduring |
@@ -161,16 +184,47 @@ Regenerate the Lean file after touching the ledger or the spine:
 python3 tools/gen_lean.py > formal/DryRun.lean
 ```
 
-## Layer 3 — Empirical bookkeeping (`test_dryrun.py`, `test_accounting.py`, `test_invariants.py`, `test_payloads.py`)
+## Layer 3 — Empirical bookkeeping (`test_dryrun.py`, `test_accounting.py`,
+`test_invariants.py`, `test_payloads.py`, `test_fuzz.py`)
 
-The executor (`DryRun`) is checked against conservation-style laws over
-real runs: liveness (all 26 flows fire every tick), the conservation
-identity `emitted = consumed + sunk + delta in-transit` (misses remove
-nothing and are budgeted separately), stationarity (per-tick stats
-identical from tick 2; tick 1 differs only in the two cycle warm-up misses
-and the matching consumption deficit), and the master invariants
-re-derived empirically. A final assertion replays `step_flow` for 32 ticks
+The executor (`DryRun`) is checked against the adjudicated channel
+semantics over real runs: first-arrival-wins acceptance, reject-with-charge
+on full mailboxes, liveness (all 26 flows accepted exactly once per tick
+under the canonical schedule, nothing refused), and the two exact
+conservation identities per flow per tick — `attempted = accepted +
+refused` (A) and `accepted = consumed + sunk + delta depth` (B). Refused
+copies never enter (B); a miss is a deficit charge on the expectation side
+and removes nothing. Intra-tick INV-BOUNDS is asserted empirically via
+`prefix_depth` (depth <= 1 after every prefix of a flow's event word) and
+the executor's `max_depth` monitor (sampled at every arrival and
+consumption boundary). Stationarity: per-tick stats identical from tick 2;
+tick 1 differs only in the two cycle warm-up misses and the matching
+consumption deficit. A final assertion replays `step_flow` for 32 ticks
 and confirms the pure scalar model tracks the executor tick for tick.
+
+## Property-based fuzz (`amateur/fuzz.py`, `test_fuzz.py`)
+
+Randomized adversarial injection on the entity channels (#1, #3) is run
+once in `test_fuzz.py`'s `setUpClass` and asserted seed by seed:
+
+- distribution: seeds 0–11, 1000 ticks each, multiplicities k drawn
+  uniformly in [1, 8] per injected flow per tick (peak multiplicity
+  recorded as `peak_k`; every seed reaches 8 on both channels);
+- per tick of every seed, for all 26 flows: intra-tick INV-BOUNDS (`max_depth` <= 1
+  at every event boundary, mailbox depth <= 1 at every tick boundary);
+  identity A and identity B exactly; schedule-shift `attempt == 1`
+  outside the plan; scalar agreement with canonical `step_flow`;
+- round-7 results: per seed attempted ~32,821–33,139, accepted =
+  26,000 exactly (= 26 flows x 1000 ticks), refused ~6,821–7,139, missed
+  = 2 exactly (the cycle warm-ups); over the whole 12-seed sweep
+  attempted = 395,794, accepted = 312,000, refused = 83,794, missed =
+  24. Adversarial pressure registers in every seed (refused > 0) while
+  the depth bound never breaks — the charge stays scalar, the flood
+  never relocates into state.
+- **Scope pin: multiplicities k >= 1 only.** Zero-injection (starvation)
+  semantics are deferred to the physics epoch; an idle tick is a
+  legitimate state, not a liveness violation. The distribution above is
+  a property of the harness, not part of the spec.
 
 ## Layer 4 — Design intent (`test_design_intent.py`, `test_contracts.py`, `test_engine.py`)
 
@@ -185,11 +239,32 @@ the implemented behavior.
   payload must carry `(source_fid, tick_born)` and be derived from actual
   node state — no minting at emit time. The current synthetic contents
   (`cry-{t}`, rotating confidences) are acceptable only in the dry run.
-- **Overflow semantics (round 7, pending adjudication):** duplicate or
-  adversarial arrivals at a mailbox must be handled under explicit
-  semantics (proposed: reject-with-charge) chosen so INV-CONSERVE survives
-  verbatim, and per-flow step contraction must be proved in Lean under
-  those semantics.
+- **Overflow semantics (round 7, ADJUDICATED — reject-with-charge):**
+  each mailbox has capacity 1. Acceptance is first-arrival-wins with
+  ledger order as tie-break — deterministic, stateless, pointwise. A
+  refused arrival increments a scalar excess charge and the event object
+  is discarded at the channel: no refusal logs, no charged-payload
+  retention, no replay. Charges are O(1) per channel, exactly like
+  sinks. Misses (deficit: expected, absent) and refusals (excess:
+  arrived, refused) are distinct charge kinds with separate counters,
+  never summed. The identities `attempted = accepted + refused` (A) and
+  `accepted = consumed + delta-sunk + delta-depth` (B) hold per flow per
+  tick and are preserved verbatim; per-flow step contraction and the
+  intra-tick depth bound (depth <= 1 at every event boundary, not merely
+  at tick snapshots) are proved in Lean (`fold_box_bounded`,
+  `step_contraction`, `emit_full_box`, `emit_empty_box`).
+- **Starvation deferral (fuzz scope is not the spec):** fuzz
+  multiplicities are k >= 1 only; zero-injection (starvation) semantics
+  are deferred to the physics epoch together with trigger-gating —
+  "without throughput, the geometry remains without unfolding" means an
+  idle tick is a legitimate state, not a liveness violation, and the
+  enduring form of INV-LIVENESS is re-scoped then.
+- **Refusal coupling (design intent, physics epoch):** refusal rate at
+  the blanket is the world arriving faster than we can digest. Sustained
+  excess must drive collapse pressure at 4.0/5.0, and dissipated refusal
+  ultimately exits as entropy exhaust. Today the charges are pure
+  accounting with no feedback into dynamics; this coupling is recorded
+  now so that it is built, not rediscovered.
 
 ## What each layer catches that the others cannot
 

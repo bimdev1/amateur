@@ -56,8 +56,11 @@ class TestLiveness(unittest.TestCase):
         report = DryRun().run(4)
         for stat in report.history:
             self.assertEqual(
-                stat.emitted, {f.fid: 1 for f in FLOW_LEDGER}
+                stat.accepted, {f.fid: 1 for f in FLOW_LEDGER}
             )
+            self.assertEqual(stat.attempted, stat.accepted)
+            self.assertEqual(stat.refused, {})
+            self.assertEqual(stat.missed, {10: 1, 17: 1} if stat is report.history[0] else {})
 
 
 class TestCausal(unittest.TestCase):
