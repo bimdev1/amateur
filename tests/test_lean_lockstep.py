@@ -33,8 +33,9 @@ _LEAN_TO_WORD = {"Op.emit": "emit", "Op.consume": "consume", "Op.sink": "sink"}
 
 
 def parse_ops_of(text: str) -> dict[int, tuple[str, ...]]:
+    section = text.split("def opsOf", 1)[1].split("| _ => []", 1)[0]
     arms: dict[int, tuple[str, ...]] = {}
-    for match in re.finditer(r"^\s*\| (\d+) => \[([^\]]*)\]", text, re.M):
+    for match in re.finditer(r"^\s*\| (\d+) => \[([^\]]*)\]", section, re.M):
         words = tuple(
             _LEAN_TO_WORD[w.strip()]
             for w in match.group(2).split(",")
@@ -167,8 +168,23 @@ class TestLeanCompiles(unittest.TestCase):
             "emit_liveness",
             "consume_sink_split",
             "balance_at_master",
+            "geometry_write_channel_purity",
+            "geometry_writes_anchored",
+            "mat_operational",
+            "mat_fresh",
+            "mat_bounded",
         ):
             self.assertRegex(text, rf"\btheorem {name}\b")
+
+    def test_payload_schema_markers_match_python(self) -> None:
+        text = FORMAL.read_text()
+        self.assertIn(
+            "def d4WriteFids : List Nat := [22]", text
+        )
+        self.assertIn(
+            "def d2WriteFids : List Nat := [23, 24]", text
+        )
+        self.assertIn("rev.length > 4", text)
 
 
 if __name__ == "__main__":

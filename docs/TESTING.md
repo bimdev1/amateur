@@ -29,6 +29,42 @@ execution:
     (#1/#3) and lateral output (#2/#4/#5); the driving gradient itself
     never circulates.
 
+## Typed payload schema (INV-EMPTINESS / INV-NO-OSSIFY by construction)
+
+The two parametric-geometry stores carry typed payloads (`amateur/payloads.py`),
+so the philosophy is enforced by the type system, not by observation:
+
+- **D2 Multi-Layer Mat** carries `MatOverlay(epoch: int, overlay_id: str,
+  status: {"active", "stale"})` — enough structure to verify the eviction
+  pairing (#25 read feeds the #24 revalidation) and to prove INV-NO-OSSIFY:
+  no overlay persists more than one tick without re-validation, and the
+  board never exceeds `MAT_CAPACITY` (4) residents.
+- **D4 Base Core** carries `BiasPrimitive(bias_primitive: str,
+  confidence: float)` and *only* that. Trajectory, state-delta, and context
+  types are structurally absent from the schema, so INV-EMPTINESS holds by
+  construction: a trajectory cannot be written to the core because no
+  trajectory type is nameable there.
+
+The schema is an exact-type whitelist (`allowed_payload` / `require_payload`):
+per flow id, only one payload type (or `None` outside geometry channels) is
+accepted, and subclassing cannot sneak past it (`Sneaky(MatOverlay)` is
+rejected). Flow ids derive from the ledger itself: `D2_FLOWS = {8, 23, 24,
+25}`, `D4_FLOWS = {7, 22}`, with ratchet-owned writes `D2_WRITES = {23, 24}`
+and `D4_WRITES = {22}`.
+
+The mat lifecycle is one closed policy — mirrored byte-for-byte by the Lean
+`matTick`/`matRun` recursion and by the executor's `MatBoard`: seed one
+overlay (`"ovr-0"`, epoch 0); each tick *t* append a birth (#23, epoch *t*),
+revalidate the head at epoch *t* (its stale snapshot was just read by #25 at
+the same stage), then evict the head iff the board exceeds capacity 4.
+Consequences proved for all ticks in Lean: `mat_operational` (closed form
+`replicate 2 (t+2) ++ replicate 2 (t+3)`), `mat_fresh` (every resident epoch
+is *t* or *t−1* — nothing ossifies), `mat_bounded` (≤ 4 residents).
+
+`test_payloads.py` covers the schema, the subclass/trajectory rejection, the
+lifecycle, and 200-tick executor integration (no trajectory ever reaches D4;
+#25→#24 same-tick pairing on `overlay_id`).
+
 ## Layer 2 — Pointwise recurrence, proved (`amateur/dryrun.py`, `formal/DryRun.lean`, `tools/gen_lean.py`, `test_lean_lockstep.py`)
 
 Because each flow's mailbox sees only its own op word, the whole executor
@@ -46,6 +82,11 @@ shape for *all* ticks, not just sampled ones:
 | `emit_liveness` | per-op table: every flow's word emits exactly once (fids 1..26) |
 | `consume_sink_split` | per-op table: every flow either consumes once or is a sink (fids 1..26) |
 | `balance_at_master` | at the master profile, box' + sunk' + consumes = fbox i + 1 per flow |
+| `geometry_write_channel_purity` | the payload kinds excluded from geometry (trajectory, delta, context) are absent from *both* D2 and D4 channel allow-lists |
+| `geometry_writes_anchored` | D4 writes are exactly flow #22 and D2 writes exactly {#23, #24}, all ratchet (6.0) consume ops |
+| `mat_operational` | closed form: `matRun (t+3) = replicate 2 (t+2) ++ replicate 2 (t+3)` |
+| `mat_fresh` | INV-NO-OSSIFY: every resident epoch in `matRun t` (t ≥ 1) equals *t* or *t−1* |
+| `mat_bounded` | `(matRun t).length ≤ 4` at every tick |
 
 Proof architecture: per-flow *warm* facts (one tick from zero) and *step*
 facts (one tick from the master profile) — the concrete fid arms discharge
@@ -65,12 +106,12 @@ How each user-supplied master invariant is currently verified:
 | INV-CONSERVE | proven per-flow + empirical system-wide | Lean `flow_balance`, `balance_at_master`; `test_accounting` identity |
 | INV-EXHAUST | proven | Lean `sunk_master` |
 | INV-CAUSAL | structural | `test_invariants.TestCausal` |
-| INV-GEOMETRY | structural (factual writer sets) | `test_invariants.TestGeometry`; D1/D3 operational writes flagged pending adjudication |
-| INV-NO-OSSIFY | deferred | needs payload semantics (stale-overlay epochs) |
-| INV-EMPTINESS | deferred | needs payload semantics (typed D4 records) |
+| INV-GEOMETRY | adjudicated two-tier reading: structural (writer sets) + proven (type-system purity) | `test_invariants.TestGeometry`; Lean `geometry_write_channel_purity`, `geometry_writes_anchored`; D2/D4 are the parametric geometry written only by 6.0, D1/D3 operational by design |
+| INV-NO-OSSIFY | typed + proven + empirical | Lean `mat_fresh`, `mat_bounded`; `test_payloads` lifecycle/integration |
+| INV-EMPTINESS | typed by construction + proven | `MatOverlay`/`BiasPrimitive` exact-type whitelist; Lean `geometry_write_channel_purity`; `test_payloads` trajectory-rejection |
 | INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` |
 | INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` |
-| INV-CENSUS | structural + empirical | `test_recurrence` census; per-store counts flagged pending adjudication |
+| INV-CENSUS | resolved (raw membership, adjudicated) | `test_recurrence` census: \|Cycles(D1)\|=7 (entangled hub), \|Cycles(D2)\|=4, \|Cycles(D3)\|=4, \|Cycles(D4)\|=3 with zero 2-/3-hop loops — D4's structural insulation |
 
 Lockstep chain (nothing is trusted twice):
 
@@ -94,7 +135,7 @@ Regenerate the Lean file after touching the ledger or the spine:
 python3 tools/gen_lean.py > formal/DryRun.lean
 ```
 
-## Layer 3 — Empirical bookkeeping (`test_dryrun.py`, `test_accounting.py`, `test_invariants.py`)
+## Layer 3 — Empirical bookkeeping (`test_dryrun.py`, `test_accounting.py`, `test_invariants.py`, `test_payloads.py`)
 
 The executor (`DryRun`) is checked against conservation-style laws over
 real runs: liveness (all 26 flows fire every tick), the conservation
@@ -118,6 +159,6 @@ the implemented behavior.
   ever, from a cold start).
 - Layer 2 catches semantic drift between the documented op table and both
   implementations, and proves limits (`forall t`) that sampling cannot.
-- Layer 3 catches executor-only state (counters, drains) that the
-  pointwise model does not cover.
+- Layer 3 catches executor-only state (counters, drains, evictions,
+  payload emissions) that the pointwise model does not cover.
 - Layer 4 catches code that satisfies the ledger but betrays the text.

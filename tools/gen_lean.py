@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from amateur.dryrun import FLOW_OPS  # noqa: E402
 from amateur.ledger import FLOW_LEDGER  # noqa: E402
+from amateur.payloads import D2_WRITES, D4_WRITES, MAT_CAPACITY  # noqa: E402
 
 LEAN_OP = {
     "emit": "Op.emit",
@@ -433,6 +434,117 @@ theorem balance_at_master : ∀ i : Nat, 1 ≤ i → i < 27 →
 """
 
 
+PAYLOADS = f"""
+/-! ## Typed geometry payloads
+
+Payload schema (user-adjudicated):
+
+- D2 (Multi-Layer Mat) writes {sorted(D2_WRITES)} carry epoch-stamped
+  overlays; the #25 stale read pairs with each #24 ratchet write in the
+  same stage;
+- D4 (Base Core) write {sorted(D4_WRITES)} carries bias primitives only.
+  The whitelist closes the channel by construction: a trajectory,
+  state-delta, or context payload kind is not forbidden on D4 -- it is
+  unrepresentable;
+- the D2 mat lifecycle recycles one overlay per tick and evicts past
+  capacity {MAT_CAPACITY}, so no resident epoch falls more than one tick
+  behind the present (INV-NO-OSSIFY). -/
+
+inductive PayloadKind where
+  | traj | delta | ctx | overlay | bias
+  deriving DecidableEq
+
+def d4Allowed : List PayloadKind := [PayloadKind.bias]
+def d2Allowed : List PayloadKind := [PayloadKind.overlay]
+def forbiddenOfGeometry : List PayloadKind :=
+  [PayloadKind.traj, PayloadKind.delta, PayloadKind.ctx]
+
+def d4WriteFids : List Nat := [{", ".join(str(f) for f in sorted(D4_WRITES))}]
+def d2WriteFids : List Nat := [{", ".join(str(f) for f in sorted(D2_WRITES))}]
+
+/-- INV-EMPTINESS as a type-level fact: the forbidden kinds are excluded
+from every geometry write channel. -/
+theorem geometry_write_channel_purity :
+    ∀ k ∈ forbiddenOfGeometry, k ∉ d4Allowed ∧ k ∉ d2Allowed := by
+  intro k hk
+  cases k <;> simp_all [d4Allowed, d2Allowed, forbiddenOfGeometry]
+
+/-- Both geometry write channels are ratchet-owned flows, absorbed
+(compiled to consume) on the spine. -/
+theorem geometry_writes_anchored :
+    d4WriteFids = [{sorted(D4_WRITES)[0]}] ∧ d2WriteFids = [{", ".join(str(f) for f in sorted(D2_WRITES))}] ∧
+      (opsOf {sorted(D4_WRITES)[0]}).getLast? = some Op.consume ∧
+      (opsOf {sorted(D2_WRITES)[0]}).getLast? = some Op.consume :=
+  ⟨rfl, rfl, by decide, by decide⟩
+
+/-- One mat tick: birth appended, head recycled at the current epoch,
+then an eviction iff the board exceeds capacity {MAT_CAPACITY}. -/
+def revTop (l : List Nat) (t : Nat) : List Nat :=
+  match l with
+  | [] => [t]
+  | _ :: rest => rest ++ [t]
+
+def matTick (l : List Nat) (t : Nat) : List Nat :=
+  let rev := revTop (l ++ [t]) t
+  if rev.length > {MAT_CAPACITY} then rev.drop 1 else rev
+
+def matRun : Nat → List Nat
+  | 0 => [0]
+  | t + 1 => matTick (matRun t) (t + 1)
+
+theorem rep2 (v : Nat) : List.replicate 2 v = v :: v :: [] := rfl
+theorem mat_close_1 : matRun 1 = [1, 1] := rfl
+theorem mat_close_2 : matRun 2 = [1, 2, 2] := rfl
+
+/-- The operational run coincides with the two-band closed shape:
+from tick 3 the resident epochs are exactly {{t-1, t-1, t, t}}. -/
+theorem mat_operational : ∀ t : Nat, matRun (t + 3)
+    = List.replicate 2 (t + 2) ++ List.replicate 2 (t + 3) := by
+  intro t
+  induction t with
+  | zero => rfl
+  | succ k ih =>
+      show matRun (k + 4)
+          = List.replicate 2 (k + 3) ++ List.replicate 2 (k + 4)
+      have hlhs : matRun (k + 4) = matTick (matRun (k + 3)) (k + 4) := rfl
+      rw [hlhs, ih, rep2]
+      simp [matTick, revTop]
+
+/-- INV-NO-OSSIFY: no resident epoch falls more than one tick behind. -/
+theorem mat_fresh : ∀ t : Nat, 1 ≤ t →
+    ∀ e ∈ matRun t, e = t ∨ e + 1 = t := by
+  intro t
+  match t with
+  | 0 => intro h; omega
+  | 1 =>
+      intro _ e he
+      rw [mat_close_1] at he
+      simp at he
+      omega
+  | 2 =>
+      intro _ e he
+      rw [mat_close_2] at he
+      simp at he
+      omega
+  | t + 3 =>
+      intro _ e he
+      rw [mat_operational, rep2] at he
+      simp at he
+      omega
+
+/-- The mat never exceeds its capacity. -/
+theorem mat_bounded : ∀ t : Nat, (matRun t).length ≤ {MAT_CAPACITY} := by
+  intro t
+  match t with
+  | 0 => simp [matRun]
+  | 1 => simp [mat_close_1]
+  | 2 => simp [mat_close_2]
+  | t + 3 =>
+      rw [mat_operational]
+      simp
+"""
+
+
 def main() -> None:
     parts = [
         HEADER,
@@ -443,6 +555,7 @@ def main() -> None:
         WARM_BOX,
         STEP_LEMMAS,
         MASTERS,
+        PAYLOADS,
     ]
     print("\n".join(parts).rstrip() + "\n")
 

@@ -15,9 +15,10 @@ and these structural checks over what the plumbing may do in one tick:
   every prerequisite of a stage is processed by construction.
 - INV-BLANKET: the only entity-adjacent edges are the four port pairs
   around P1; every entity crossing goes through 1.0.
-- INV-GEOMETRY (factual, refined reading): operational writers of the
-  stores are D1 <- P4, D3 <- P5, and the ratchet-exclusive pair
-  D2 <- P6, D4 <- P6; no other flow writes a store.
+- INV-GEOMETRY (user-adjudicated two-tier reading): the parametric
+  geometry {D2, D4} is written only by 6.0 (the ratchet); D1/D3 are
+  operational stores with per-tick dynamic writes by design —
+  D1 <- P4, D3 <- P5; no other flow writes any store.
 """
 from __future__ import annotations
 
@@ -128,7 +129,7 @@ class TestBlanket(unittest.TestCase):
 
 
 class TestGeometry(unittest.TestCase):
-    def test_inv_geometry_factual_writer_sets(self) -> None:
+    def test_inv_geometry_adjudicated_writer_sets(self) -> None:
         writers = {
             SHORT_OF[store]: {
                 src for src, _f, dst in edges() if dst == SHORT_OF[store]

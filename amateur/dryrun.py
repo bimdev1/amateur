@@ -1,7 +1,10 @@
 """Dry run: pure event plumbing along the ledger spine.
 
 No physics — every stage consumes its ledger inputs and emits its ledger
-outputs with placeholder payloads. The driving gradient (#1, #3) and the
+outputs. The geometry channels carry typed payloads (see payloads.py):
+D2 writes (#23, #24) carry epoch-stamped overlays, D4 writes (#22) carry
+bias primitives — INV-EMPTINESS holds by construction. Every other
+payload stays a placeholder until physics. The driving gradient (#1, #3) and the
 geometry echoes (#7, #8, #11, #14, #15, #20, #25, #26) are injected every
 tick; read-consumes expect data (a miss is counted), store absorbs are
 best-effort; the two in-tick cycles (#10 Resolved Trajectory, #17 Collapse
@@ -20,6 +23,16 @@ from dataclasses import dataclass
 
 from .events import FlowEvent, carrier_for
 from .ledger import E1, E2, FLOW_LEDGER, STORES
+from .payloads import (
+    BiasPrimitive,
+    D2_FLOWS,
+    D2_WRITES,
+    D4_FLOWS,
+    D4_WRITES,
+    MatBoard,
+    MatOverlay,
+    require_payload,
+)
 
 
 @dataclass(frozen=True)
@@ -101,6 +114,35 @@ def step_flow(fid: int, box: int) -> tuple[int, int, int]:
     return box, missed, sunk
 
 
+_BIAS_STEPS = (0.4, 0.6, 0.8)
+
+
+def _payload_for(fid: int, tick: int, board: MatBoard) -> object:
+    """Synthetic payload for the typed geometry channels.
+
+    D2: the stale read (#25) delivers the board head; the ratchet's
+    revalidation (#24) and surviving-crystal birth (#23) carry the current
+    epoch. D4: the base-ops read (#7) delivers the latest bias; the
+    sedimentation (#22) mints a rotating confidence primitive. Sparse
+    reads may be None when the store has not yet filled.
+    """
+    if fid in D2_WRITES:
+        stale_id, _ = board.head()
+        if fid == 24:
+            return MatOverlay(tick, stale_id, "active")
+        return MatOverlay(tick, f"cry-{tick}", "active")
+    if fid in D2_FLOWS:
+        overlay_id, epoch = board.head()
+        return MatOverlay(epoch, overlay_id, "stale")
+    if fid in D4_WRITES:
+        slot = (tick - 1) % 3
+        return BiasPrimitive(f"bias-{slot}", _BIAS_STEPS[slot])
+    if fid in D4_FLOWS:
+        latest = board.latest_bias()
+        return latest
+    return None
+
+
 @dataclass(frozen=True)
 class TickStat:
     emitted: dict[int, int]
@@ -126,6 +168,9 @@ class DryRun:
         self.mailboxes: dict[int, deque[FlowEvent]] = {
             f.fid: deque() for f in FLOW_LEDGER
         }
+        self.board = MatBoard()
+        self.emissions: list[tuple[int, int, object]] = []
+        self._tick_no = 0
         self.emitted: Counter[int] = Counter()
         self.consumed: Counter[int] = Counter()
         self.missed: Counter[int] = Counter()
@@ -133,7 +178,10 @@ class DryRun:
 
     def _emit(self, fid: int) -> None:
         carrier = carrier_for(fid)
-        self.mailboxes[fid].append(carrier(payload=None))
+        payload = _payload_for(fid, self._tick_no, self.board)
+        require_payload(fid, payload)
+        self.mailboxes[fid].append(carrier(payload=payload))
+        self.emissions.append((self._tick_no, fid, payload))
         self.emitted[fid] += 1
 
     def _consume(self, fid: int, *, silent: bool = False) -> None:
@@ -147,6 +195,21 @@ class DryRun:
     def _absorb_writes(self) -> None:
         for fid in WRITE_FLOWS:
             self._consume(fid, silent=True)
+        payloads = {
+            fid: payload
+            for tick, fid, payload in self.emissions
+            if tick == self._tick_no
+        }
+        overlay = payloads.get(23)
+        if isinstance(overlay, MatOverlay):
+            self.board.birth(overlay)
+        overlay = payloads.get(24)
+        if isinstance(overlay, MatOverlay):
+            self.board.revalidate(overlay)
+        self.board.evict_if_needed(self._tick_no)
+        bias = payloads.get(22)
+        if isinstance(bias, BiasPrimitive):
+            self.board.sediment(bias)
 
     def _drain_sinks(self) -> None:
         for fid in SINK_FLOWS:
@@ -155,6 +218,7 @@ class DryRun:
             box.clear()
 
     def tick(self) -> None:
+        self._tick_no += 1
         for fid in PER_TICK_INJECTIONS:
             self._emit(fid)
         for stage in SPINE:
