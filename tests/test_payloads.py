@@ -22,6 +22,7 @@ import unittest
 from amateur.dryrun import WRITE_FLOWS, DryRun
 from amateur.ledger import FLOW_LEDGER
 from amateur.payloads import (
+    BOARD_CAPACITY,
     D2_FLOWS,
     D2_WRITES,
     D4_FLOWS,
@@ -36,7 +37,11 @@ from amateur.payloads import (
     NOOP_OVERLAY_ID,
     REAL_BODIES,
     BiasPrimitive,
+    BoardOpBody,
+    BoardSlot,
+    BoardStore,
     CollapseMandateBody,
+    CostErrorBody,
     DebrisPool,
     DigestedDebrisBody,
     EmergentCrystalBody,
@@ -46,6 +51,7 @@ from amateur.payloads import (
     MatOverlay,
     PAYLOAD_SCHEMA,
     PredictionErrorBody,
+    SlotStateBody,
     StateDeltaBody,
     StructuralMotifBody,
     allowed_payload,
@@ -532,6 +538,315 @@ class TestMatBoardGuardRails(unittest.TestCase):
         self.assertEqual(board.patch_bytes(), 10)
         self.assertEqual(board.evictions, [("ovr-1", 1, 4)])
         board.assert_patch_bounds(require_complete=True)
+
+
+class TestBoardBodies(unittest.TestCase):
+    """#13/#14 bodies: frozen, exact-type, validated, hashable."""
+
+    def _op(self, **overrides: object) -> BoardOpBody:
+        values: dict[str, object] = {
+            "op": "write",
+            "slot_id": "ctx-1-abc",
+            "body_id": "a" * 32,
+            "nbytes": 8 * 64,
+            "reason": "cold-start",
+            "tick": 1,
+        }
+        values.update(overrides)
+        return BoardOpBody(**values)  # type: ignore[arg-type]
+
+    def _state(self, **overrides: object) -> SlotStateBody:
+        values: dict[str, object] = {
+            "capacity": 8,
+            "occupied": 2,
+            "nbytes": 1024,
+            "slot_ids": ("s0", "s1"),
+            "oldest_slot_id": "s0",
+        }
+        values.update(overrides)
+        return SlotStateBody(**values)  # type: ignore[arg-type]
+
+    def test_bodies_are_frozen_hashable_and_exact_typed(self) -> None:
+        bodies = [
+            self._op(),
+            self._state(),
+            BoardSlot("s0", "b" * 32, 512, 1),
+        ]
+        for body in bodies:
+            self.assertEqual(hash(body), hash(body))
+        self.assertEqual(
+            PAYLOAD_SCHEMA[13], frozenset({BoardOpBody, type(None)})
+        )
+        self.assertEqual(
+            PAYLOAD_SCHEMA[14], frozenset({SlotStateBody, type(None)})
+        )
+        self.assertEqual(
+            PAYLOAD_SCHEMA[16], frozenset({CostErrorBody, type(None)})
+        )
+        self.assertIn(BoardOpBody, PAYLOAD_SCHEMA[13])
+        self.assertIn(SlotStateBody, PAYLOAD_SCHEMA[14])
+
+    def test_board_op_validation(self) -> None:
+        for bad in (
+            {"op": "mint"},
+            {"op": "write", "body_id": None},
+            {"op": "write", "nbytes": 0},
+            {"op": "write", "slot_id": ""},
+            {"op": "write", "tick": -1},
+            {"op": "write", "reason": ""},
+            {"op": "evict", "body_id": "x", "nbytes": 0},
+            {"op": "evict", "body_id": None, "nbytes": 8},
+            {"op": "resize", "body_id": None, "nbytes": 0},
+            {"op": "resize", "body_id": "x", "nbytes": 4},
+        ):
+            with self.assertRaises((TypeError, ValueError), msg=repr(bad)):
+                self._op(**bad)
+        with self.assertRaises(TypeError):
+            self._op(nbytes=True)
+        with self.assertRaises(TypeError):
+            self._op(tick=False)
+
+    def test_slot_state_validation(self) -> None:
+        for bad in (
+            {"occupied": 1},
+            {"occupied": 3},
+            {"slot_ids": ("s0", "s0")},
+            {"oldest_slot_id": "s1"},
+            {"oldest_slot_id": None},
+            {"capacity": 0},
+            {"nbytes": -1},
+            {"slot_ids": ["s0", "s1"]},
+        ):
+            with self.assertRaises((TypeError, ValueError), msg=repr(bad)):
+                self._state(**bad)
+        empty = self._state(occupied=0, nbytes=0, slot_ids=(), oldest_slot_id=None)
+        self.assertEqual(empty.occupied, 0)
+
+    def test_board_slot_validation(self) -> None:
+        for bad in (
+            ("", "b" * 32, 512, 1),
+            ("s0", "", 512, 1),
+            ("s0", "b" * 32, 0, 1),
+            ("s0", "b" * 32, 512, -1),
+        ):
+            with self.assertRaises((TypeError, ValueError), msg=repr(bad)):
+                BoardSlot(*bad)  # type: ignore[arg-type]
+
+
+class TestBoardStore(unittest.TestCase):
+    """D1 minimal store: atomic #13 commits, single writer, no constants."""
+
+    def _write(
+        self, tick: int, slot_id: str = "s0", nbytes: int = 512
+    ) -> BoardOpBody:
+        return BoardOpBody(
+            "write", slot_id, "d" * 32, nbytes, "test-write", tick
+        )
+
+    def _evict(self, tick: int, slot_id: str) -> BoardOpBody:
+        return BoardOpBody("evict", slot_id, None, 0, "test-evict", tick)
+
+    def _erase(self, tick: int, slot_id: str) -> BoardOpBody:
+        return BoardOpBody("erase", slot_id, None, 0, "test-erase", tick)
+
+    def _resize(self, tick: int, capacity: int) -> BoardOpBody:
+        return BoardOpBody("resize", "s0", None, capacity, "test-resize", tick)
+
+    def test_initial_state_is_empty(self) -> None:
+        store = BoardStore()
+        self.assertEqual(store.capacity, BOARD_CAPACITY)
+        self.assertEqual(store.slots(), ())
+        self.assertEqual(store.evictions(), ())
+        self.assertIsNone(store.slot_state())
+        self.assertIsNone(store.last_commit)
+        self.assertIsNone(store.state_provenance)
+
+    def test_write_commits_slot_and_state_provenance(self) -> None:
+        store = BoardStore()
+        store.apply(self._write(1, "s0", 512), Provenance(13, 1))
+        state = store.slot_state()
+        assert state is not None
+        self.assertEqual(state.capacity, BOARD_CAPACITY)
+        self.assertEqual(state.occupied, 1)
+        self.assertEqual(state.nbytes, 512)
+        self.assertEqual(state.slot_ids, ("s0",))
+        self.assertEqual(state.oldest_slot_id, "s0")
+        self.assertEqual(store.last_commit, 1)
+        self.assertEqual(store.state_provenance, Provenance(13, 1))
+        self.assertEqual(store.slots()[0].body_id, "d" * 32)
+        self.assertEqual(store.evictions(), ())
+
+    def test_oldest_and_byte_sum_follow_insertion_order(self) -> None:
+        store = BoardStore()
+        for tick, slot_id in ((1, "a"), (2, "b"), (3, "c")):
+            store.apply(self._write(tick, slot_id, 8 * 64), Provenance(13, tick))
+        state = store.slot_state()
+        assert state is not None
+        self.assertEqual(state.slot_ids, ("a", "b", "c"))
+        self.assertEqual(state.oldest_slot_id, "a")
+        self.assertEqual(state.occupied, len(state.slot_ids))
+        self.assertEqual(
+            state.nbytes, sum(slot.nbytes for slot in store.slots())
+        )
+
+    def test_evict_removes_oldest_and_records_eviction(self) -> None:
+        store = BoardStore()
+        for tick, slot_id in ((1, "a"), (2, "b"), (3, "c")):
+            store.apply(self._write(tick, slot_id), Provenance(13, tick))
+        store.apply(self._evict(4, "a"), Provenance(13, 4))
+        state = store.slot_state()
+        assert state is not None
+        self.assertEqual(state.slot_ids, ("b", "c"))
+        self.assertEqual(store.evictions(), (("a", 4),))
+        self.assertEqual(store.last_commit, 4)
+
+    def test_erase_removes_without_eviction_record(self) -> None:
+        store = BoardStore()
+        store.apply(self._write(1, "a"), Provenance(13, 1))
+        store.apply(self._erase(2, "a"), Provenance(13, 2))
+        state = store.slot_state()
+        assert state is not None
+        self.assertEqual(state.occupied, 0)
+        self.assertEqual(store.evictions(), ())
+        self.assertEqual(store.last_commit, 2)
+
+    def test_resize_changes_capacity(self) -> None:
+        store = BoardStore()
+        store.apply(self._write(1, "a"), Provenance(13, 1))
+        store.apply(self._resize(2, 10), Provenance(13, 2))
+        self.assertEqual(store.capacity, 10)
+        state = store.slot_state()
+        assert state is not None
+        self.assertEqual(state.capacity, 10)
+        self.assertEqual(store.last_commit, 2)
+
+    def test_forced_refusal_is_atomic(self) -> None:
+        """§9.11a: a refused #13 leaves D1 byte-identical, no eviction."""
+        store = BoardStore()
+        for tick, slot_id in enumerate(("s0", "s1", "s2", "s3", "s4",
+                                        "s5", "s6", "s7"), start=1):
+            store.apply(self._write(tick, slot_id), Provenance(13, tick))
+        before = (
+            store.state_digest(),
+            store.evictions(),
+            store.last_commit,
+            store.slots(),
+            store.slot_state(),
+        )
+        with self.assertRaises(ValueError):
+            store.apply(self._write(9, "s8"), Provenance(13, 9))
+        after = (
+            store.state_digest(),
+            store.evictions(),
+            store.last_commit,
+            store.slots(),
+            store.slot_state(),
+        )
+        self.assertEqual(before, after)
+        self.assertEqual(store.last_commit, 8)
+        self.assertEqual(store.evictions(), ())
+
+    def test_other_refusals_are_atomic(self) -> None:
+        store = BoardStore()
+        store.apply(self._write(1, "a"), Provenance(13, 1))
+        before = store.state_digest()
+        for bad in (
+            self._write(2, "a"),          # duplicate
+            self._evict(2, "missing"),    # unknown evict
+            self._erase(2, "missing"),    # unknown erase
+            self._resize(2, BOARD_CAPACITY),  # unchanged capacity
+        ):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                store.apply(bad, Provenance(13, bad.tick))
+            self.assertEqual(store.state_digest(), before, msg=repr(bad))
+        # A shrink below occupancy is also refused atomically.
+        store.apply(self._write(2, "b"), Provenance(13, 2))
+        before = store.state_digest()
+        with self.assertRaises(ValueError):
+            store.apply(self._resize(3, 1), Provenance(13, 3))
+        self.assertEqual(store.state_digest(), before)
+
+    def test_provenance_guard(self) -> None:
+        store = BoardStore()
+        before = store.state_digest()
+        with self.assertRaises(TypeError):
+            store.apply(self._write(1), (13, 1))  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            store.apply(self._write(1), Provenance(14, 1))
+        with self.assertRaises(ValueError):
+            store.apply(self._write(1), Provenance(13, 2))
+        with self.assertRaises(TypeError):
+            store.apply({"op": "write"}, Provenance(13, 1))  # type: ignore[arg-type]
+        self.assertEqual(store.state_digest(), before)
+        self.assertIsNone(store.slot_state())
+
+    def test_state_digest_is_deterministic(self) -> None:
+        first = BoardStore()
+        second = BoardStore()
+        for store in (first, second):
+            store.apply(self._write(1, "a"), Provenance(13, 1))
+            store.apply(self._write(2, "b"), Provenance(13, 2))
+        self.assertEqual(first.state_digest(), second.state_digest())
+        second.apply(self._evict(3, "a"), Provenance(13, 3))
+        self.assertNotEqual(first.state_digest(), second.state_digest())
+
+    def test_single_writer_surface(self) -> None:
+        """§9.11c: apply is the only public mutator; #12 must not touch D1."""
+        public = {
+            name for name in dir(BoardStore) if not name.startswith("_")
+        }
+        self.assertEqual(
+            public,
+            {
+                "apply",
+                "capacity",
+                "evictions",
+                "last_commit",
+                "slot_state",
+                "slots",
+                "state_digest",
+                "state_provenance",
+            },
+        )
+        import inspect
+
+        source = inspect.getsource(BoardStore)
+        self.assertNotIn("StateDeltaBody", source)
+        self.assertEqual(
+            tuple(inspect.signature(BoardStore.apply).parameters),
+            ("self", "op", "provenance"),
+        )
+        from amateur.stores import ElasticBoard
+
+        doc = ElasticBoard.apply.__doc__ or ""
+        self.assertIn("#13", doc)
+        self.assertNotIn("Flow #12: write", doc)
+
+    def test_read_accessors_do_not_mutate(self) -> None:
+        store = BoardStore()
+        store.apply(self._write(1, "a"), Provenance(13, 1))
+        before = store.state_digest()
+        store.slot_state()
+        store.slots()
+        store.evictions()
+        store.last_commit
+        store.state_provenance
+        store.state_digest()
+        self.assertEqual(store.state_digest(), before)
+
+    def test_synthetic_source_still_returns_none_for_13_and_16(self) -> None:
+        """§9.4: dropping 13/16 from PLACEHOLDER later does not change the
+        synthetic default envelope (verify, don't assume)."""
+        from amateur.dryrun import SyntheticSource
+
+        source = SyntheticSource()
+        for fid in (13, 16):
+            self.assertIsNone(
+                source.derive_body(
+                    fid, 1, board=MatBoard(), debris=DebrisPool()
+                ),
+                msg=f"#{fid}",
+            )
 
 
 if __name__ == "__main__":

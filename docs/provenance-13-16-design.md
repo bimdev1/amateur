@@ -740,3 +740,37 @@ re-verified: `formal/DryRun.lean` has **zero** provenance mentions and
 byte-identical and must not add or change Lean. D1 bounds and the regulator
 are Python-tested, not proved, and the design record must say so in those
 words.
+
+### 9.14 Phase 1 review rulings (2026-11-20, after implementation)
+
+Phase 1 reviewed against the code, not the report, and re-measured in an
+isolated worktree at HEAD + the phase-1 files: **348 tests OK (1 expected
+failure, 27 skipped), generator byte-identical**. The ADMISSION
+`@expectedFailure` is intact in that tree, so the new files do not touch the
+round's recorded failure.
+
+1. **`stores.py` docstring correction: accepted.** It is required by §9.10;
+   the omission was the Lead's write-scope list, not the implementer's
+   deviation.
+2. **"D1 empty" = never committed (`last_commit is None`). Confirmed.** A
+   board emptied by erase/evict returns a real `SlotStateBody` with
+   `occupied = 0` and the prior commit's provenance: that state is derived
+   from commits, and P4 needs `occupied = 0` to take the free-slot branch.
+   Phase 2 must **not** add `if occupied == 0: None`.
+3. **`resize`: schema-legal, operator/test-only this slice.** `nbytes` is
+   the new capacity; same-capacity and below-occupancy resizes are refused.
+   The Regulator must never emit `resize`, and a test must pin that.
+4. **`BoardSlot.nbytes > 0`: confirmed** — slots only arise from writes.
+5. **New requirement — monotone commit order.** `oldest_slot_id` and
+   `slot_ids` order currently come from dict insertion order, which equals
+   born-tick order only if commits are monotone, and `apply` accepts a stale
+   tick today. Add: reject `op.tick <= last_commit` ("#13 commits must
+   strictly increase"; one `#13` per tick by the ledger), and have
+   `slot_state()` assert the resident born-ticks are strictly increasing
+   before publishing `oldest_slot_id`. `oldest` must be a property of
+   evidence, not of insertion accident.
+6. **`#16.cost` is the pre-op occupancy. Confirmed and to be documented.**
+   `#16` is derived before the `#13` of the same tick arrives, so `cost` is
+   what `#14` reported — the honest evidence available. The post-commit
+   occupancy becomes visible as `#14` on the next tick. A "cost + nbytes"
+   projection would be a prediction, not derivation, and is refused.

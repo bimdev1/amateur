@@ -32,11 +32,16 @@ Accounting surfaces added for phase 4-5b (task-6):
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from collections import deque
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .ledger import FLOW_LEDGER, STORES
+
+if TYPE_CHECKING:  # runtime import is local to BoardStore.apply (cycle guard)
+    from .provenance import Provenance
 
 _D2 = next(s for s in STORES if s.startswith("D2"))
 _D4 = next(s for s in STORES if s.startswith("D4"))
@@ -56,6 +61,14 @@ NO_MANDATE_REASON = "none"
 #: D3 production bounds: 8 bodies x 512 B centroid + bookkeeping, 64 KiB.
 DEBRIS_CAPACITY = 8
 DEBRIS_MAX_BYTES = 65_536
+
+#: D1 production bound: 8 context slots (design constant, like D3's 8).
+#: No byte ceiling: D1 retains metadata + content digest only, so there is
+#: no represented payload to bound (Lead adjudication 2026-11-20, §9.7).
+BOARD_CAPACITY = 8
+
+#: The only board-operation verbs #13 may carry.
+BOARD_OP_VERBS = ("write", "erase", "resize", "evict")
 
 #: D2 patch bounds (Q1-A).  Per patch: a head patch (136,960 B) fits, a
 #: full-predictor patch (843,680 B) does not.  Per table: four per-patch
@@ -179,8 +192,105 @@ class StateDeltaBody:
 
 
 @dataclass(frozen=True)
+class BoardOpBody:
+    """#13 P4 -> D1: one board operation (write/erase/resize/evict).
+
+    The body is the *operation*, not the context content: ``body_id`` is a
+    content-addressed digest of the ``#12`` delta that the write represents,
+    and ``nbytes`` is ``8 * len(delta)`` (represented bytes, computed at the
+    regulator, never a literal).  For ``resize``, ``nbytes`` is the new slot
+    capacity; for ``erase``/``evict`` it is 0 and ``body_id`` is ``None``.
+    """
+
+    op: str
+    slot_id: str
+    body_id: str | None
+    nbytes: int
+    reason: str
+    tick: int
+
+    def __post_init__(self) -> None:
+        if self.op not in BOARD_OP_VERBS:
+            raise ValueError(
+                f"op must be one of {BOARD_OP_VERBS}, got {self.op!r}"
+            )
+        if type(self.slot_id) is not str or not self.slot_id:
+            raise ValueError("slot_id must be a non-empty string")
+        if self.body_id is not None and (
+            type(self.body_id) is not str or not self.body_id
+        ):
+            raise ValueError("body_id must be a non-empty string or None")
+        if type(self.nbytes) is not int or isinstance(self.nbytes, bool):
+            raise TypeError(f"nbytes must be an int, got {self.nbytes!r}")
+        if self.nbytes < 0:
+            raise ValueError("nbytes must be non-negative")
+        if type(self.reason) is not str or not self.reason:
+            raise ValueError("reason must be a non-empty string")
+        if type(self.tick) is not int or isinstance(self.tick, bool):
+            raise TypeError(f"tick must be an int, got {self.tick!r}")
+        if self.tick < 0:
+            raise ValueError("tick must be non-negative")
+        if self.op == "write":
+            if self.body_id is None or self.nbytes <= 0:
+                raise ValueError("write requires body_id and nbytes > 0")
+        elif self.op == "resize":
+            if self.body_id is not None or self.nbytes <= 0:
+                raise ValueError("resize requires body_id=None and nbytes > 0")
+        else:  # erase / evict
+            if self.body_id is not None or self.nbytes != 0:
+                raise ValueError("erase/evict require body_id=None and nbytes=0")
+
+
+@dataclass(frozen=True)
+class SlotStateBody:
+    """#14 D1 -> P4: the board's slot identity and occupancy snapshot.
+
+    No content bytes are retained by this slice (Lead adjudication Q2); the
+    body is a pure state snapshot (no tick field) so the executor read is
+    derived from D1, not from the clock.
+    """
+
+    capacity: int
+    occupied: int
+    nbytes: int
+    slot_ids: tuple[str, ...]
+    oldest_slot_id: str | None
+
+    def __post_init__(self) -> None:
+        for name in ("capacity", "occupied", "nbytes"):
+            value = getattr(self, name)
+            if type(value) is not int or isinstance(value, bool):
+                raise TypeError(f"{name} must be an int, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        if self.capacity < 1:
+            raise ValueError("capacity must be positive")
+        if not isinstance(self.slot_ids, tuple):
+            raise TypeError("slot_ids must be a tuple")
+        for slot_id in self.slot_ids:
+            if type(slot_id) is not str or not slot_id:
+                raise ValueError("slot_ids entries must be non-empty strings")
+        if len(set(self.slot_ids)) != len(self.slot_ids):
+            raise ValueError("slot_ids must be unique")
+        if self.occupied != len(self.slot_ids):
+            raise ValueError("occupied must equal len(slot_ids)")
+        if self.occupied > self.capacity:
+            raise ValueError("occupied exceeds capacity")
+        expected_oldest = self.slot_ids[0] if self.slot_ids else None
+        if self.oldest_slot_id != expected_oldest:
+            raise ValueError(
+                "oldest_slot_id must be slot_ids[0] or None if empty"
+            )
+
+
+@dataclass(frozen=True)
 class CostErrorBody:
-    """#16 P4 -> P5: allocation cost against digest error."""
+    """#16 P4 -> P5: allocation cost against digest error.
+
+    ``cost`` is the *represented* bytes D1 retains a handle to
+    (``sum(slot.nbytes)``, i.e. ``8 * len(delta)`` per written record), not
+    the store's own metadata footprint (Lead adjudication Q5).
+    """
 
     cost: float
     error: float
@@ -377,6 +487,8 @@ REAL_BODIES: dict[int, type] = {
     18: EmergentCrystalBody,
     19: DigestedDebrisBody,
     21: StructuralMotifBody,
+    13: BoardOpBody,
+    14: SlotStateBody,
 }
 
 
@@ -671,6 +783,193 @@ class DebrisPool:
 
     def __len__(self) -> int:
         return len(self._entries)
+
+
+@dataclass(frozen=True)
+class BoardSlot:
+    """One resident D1 context slot: identity and represented size only.
+
+    The slot retains a content digest (``body_id``) and the represented
+    byte count, not the context vector itself (Lead adjudication Q2).  D1
+    is operational, not parametric geometry, so this record is never a
+    geometry payload.
+    """
+
+    slot_id: str
+    body_id: str
+    nbytes: int
+    born_tick: int
+
+    def __post_init__(self) -> None:
+        for name in ("slot_id", "body_id"):
+            value = getattr(self, name)
+            if type(value) is not str or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        if type(self.nbytes) is not int or isinstance(self.nbytes, bool):
+            raise TypeError(f"nbytes must be an int, got {self.nbytes!r}")
+        if self.nbytes <= 0:
+            raise ValueError("nbytes must be positive for a written slot")
+        if type(self.born_tick) is not int or isinstance(self.born_tick, bool):
+            raise TypeError(f"born_tick must be an int, got {self.born_tick!r}")
+        if self.born_tick < 0:
+            raise ValueError("born_tick must be non-negative")
+
+
+class BoardStore:
+    """D1 Elastic Board, minimal slice: slot identity + eviction state.
+
+    This store is *not* the full ``ElasticBoard`` contract: #11 (active
+    context read) and #15 (evicted clusters) remain unimplemented, so no
+    content vector is retained and no eviction consumer exists yet
+    (Lead adjudication Q2/Q9).  ``BoardSlot.nbytes`` is the *represented*
+    bytes of the #12 context record the write stands for (``8 *
+    len(delta)``), not this store's own metadata footprint; #16's ``cost``
+    uses exactly that number.
+
+    Single writer (§9.11c): ``apply`` is the only public method that can
+    mutate the board.  It is the executor-side, post-arrival commit of a
+    #13 ``BoardOpBody``; #12 handling (P4's input) must never touch D1
+    (§9.10).  All preconditions are checked before the first mutation, so
+    a refused operation leaves the state digest byte-identical, records no
+    eviction, and leaves ``last_commit`` unchanged (§9.11a).
+    """
+
+    def __init__(self, capacity: int = BOARD_CAPACITY) -> None:
+        if (
+            type(capacity) is not int
+            or isinstance(capacity, bool)
+            or capacity < 1
+        ):
+            raise ValueError(f"capacity must be a positive int, got {capacity!r}")
+        self._capacity = capacity
+        self._slots: dict[str, BoardSlot] = {}
+        self._evictions: list[tuple[str, int]] = []
+        self._last_provenance: Provenance | None = None
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    @property
+    def last_commit(self) -> int | None:
+        """The tick of the last committed #13, or None before the first."""
+        if self._last_provenance is None:
+            return None
+        return self._last_provenance.tick_born
+
+    @property
+    def state_provenance(self) -> Provenance | None:
+        """The provenance of the last committed #13 (the #14 read source)."""
+        return self._last_provenance
+
+    def apply(self, op: BoardOpBody, provenance: Provenance) -> None:
+        """Commit exactly one #13 board operation, atomically.
+
+        A ``write`` appends a slot, ``evict`` removes one and records the
+        eviction, ``erase`` removes one without an eviction record, and
+        ``resize`` changes capacity (never below occupancy).  Overflow,
+        duplicate ids, unknown ids, an unchanged resize, and a provenance
+        that is not ``(13, op.tick)`` all raise before any mutation.
+        """
+        from .provenance import Provenance as _Provenance
+
+        if type(op) is not BoardOpBody:
+            raise TypeError(
+                f"BoardStore accepts BoardOpBody, got {type(op).__name__}"
+            )
+        if type(provenance) is not _Provenance:
+            raise TypeError(
+                "BoardStore needs an exact Provenance, got "
+                f"{type(provenance).__name__}"
+            )
+        if provenance != _Provenance(13, op.tick):
+            raise ValueError(
+                f"#13 provenance must be (13, {op.tick}), got {provenance!r}"
+            )
+
+        # Validate every precondition before mutating anything (atomicity).
+        if op.op == "write":
+            if len(self._slots) >= self._capacity:
+                raise ValueError(
+                    f"D1 is full ({self._capacity} slots); the policy must "
+                    "evict before writing"
+                )
+            if op.slot_id in self._slots:
+                raise ValueError(f"duplicate slot_id {op.slot_id!r}")
+        elif op.op in ("evict", "erase"):
+            if op.slot_id not in self._slots:
+                raise ValueError(f"unknown slot_id {op.slot_id!r}")
+        elif op.op == "resize":
+            if op.nbytes == self._capacity:
+                raise ValueError("resize must change the capacity")
+            if op.nbytes < len(self._slots):
+                raise ValueError(
+                    f"resize to {op.nbytes} is below occupancy "
+                    f"{len(self._slots)}"
+                )
+        else:  # pragma: no cover - BoardOpBody validates the verb
+            raise ValueError(f"unsupported op {op.op!r}")
+
+        if op.op == "write":
+            assert op.body_id is not None  # BoardOpBody validation
+            self._slots[op.slot_id] = BoardSlot(
+                op.slot_id, op.body_id, op.nbytes, op.tick
+            )
+        elif op.op == "evict":
+            del self._slots[op.slot_id]
+            self._evictions.append((op.slot_id, op.tick))
+        elif op.op == "erase":
+            del self._slots[op.slot_id]
+        else:  # resize
+            self._capacity = op.nbytes
+        self._last_provenance = provenance
+
+    def slots(self) -> tuple[BoardSlot, ...]:
+        """The resident slots, oldest -> newest."""
+        return tuple(self._slots.values())
+
+    def slot_state(self) -> SlotStateBody | None:
+        """The #14 state snapshot, or None before the first committed #13.
+
+        A board emptied by erasures/evictions still reports its capacity and
+        history (it is a non-empty *state*, just an empty resident set).
+        """
+        if self._last_provenance is None:
+            return None
+        slot_ids = tuple(self._slots)
+        return SlotStateBody(
+            capacity=self._capacity,
+            occupied=len(slot_ids),
+            nbytes=sum(slot.nbytes for slot in self._slots.values()),
+            slot_ids=slot_ids,
+            oldest_slot_id=slot_ids[0] if slot_ids else None,
+        )
+
+    def evictions(self) -> tuple[tuple[str, int], ...]:
+        """Evicted (slot_id, tick) pairs; #15's future evidence, not read."""
+        return tuple(self._evictions)
+
+    def state_digest(self) -> str:
+        """Deterministic digest of the whole D1 state (atomicity checks)."""
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(repr(self._capacity).encode("utf-8"))
+        for slot in self._slots.values():
+            digest.update(
+                repr(
+                    (slot.slot_id, slot.body_id, slot.nbytes, slot.born_tick)
+                ).encode("utf-8")
+            )
+        for eviction in self._evictions:
+            digest.update(repr(eviction).encode("utf-8"))
+        provenance = self._last_provenance
+        digest.update(
+            repr(
+                None
+                if provenance is None
+                else (provenance.source_fid, provenance.tick_born)
+            ).encode("utf-8")
+        )
+        return digest.hexdigest()
 
 
 def allowed_payload(fid: int, payload: object) -> bool:

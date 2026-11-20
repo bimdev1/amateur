@@ -37,7 +37,12 @@ class ElasticBoard(ABC):
 
     @abstractmethod
     def apply(self, deltas: StateDeltas) -> None:
-        """Flow #12: write observation-loop state deltas."""
+        """P4 input only: #12 is the regulator's evidence, not a D1 write.
+
+        D1's only write edge is #13 (`operate`); a concrete store must not
+        treat this hook as a second mutation path (Lead adjudication §9.10,
+        2026-11-20).
+        """
 
     @abstractmethod
     def operate(self, ops: BoardOps) -> None:
