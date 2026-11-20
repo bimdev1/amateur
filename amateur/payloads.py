@@ -526,7 +526,6 @@ class StructuralMotifBody:
     count: int
     spread: float
     persistence: int
-    drift: float
     first_tick: int
     last_tick: int
 
@@ -543,7 +542,6 @@ class StructuralMotifBody:
             if value < 0:
                 raise ValueError(f"{name} must be non-negative")
         _require_finite("spread", self.spread)
-        _require_finite("drift", self.drift)
         for name in ("first_tick", "last_tick"):
             value = getattr(self, name)
             if type(value) is not int or isinstance(value, bool):
@@ -649,7 +647,6 @@ def noop_motif() -> StructuralMotifBody:
         count=0,
         spread=0.0,
         persistence=0,
-        drift=0.0,
         first_tick=0,
         last_tick=0,
     )

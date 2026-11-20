@@ -2010,23 +2010,31 @@ class PhysicsOrgan:
     # ------------------------------------------------- motif path (#21 -> #24)
     @staticmethod
     def _as_structural_motif(motif: Any) -> StructuralMotif:
-        """Accept a :class:`StructuralMotif`, a motif :class:`CohortRecord`,
-        or a payload ``StructuralMotifBody`` (duck-typed) and normalise it.
+        """Accept a :class:`StructuralMotif`, a motif cohort (organ
+        :class:`CohortRecord` or payload ``DebrisCohort``), or a payload
+        ``StructuralMotifBody`` (duck-typed) and normalise it.
 
         ``#21`` is an executor-derived D3 store read, so the source hands the
         organ whatever body it read; the fit only needs the window
         (``first_tick``/``last_tick``) and the lineage id.
+
+        **Drift is not fabricated here.**  The cohort read carries the
+        observed window, not the streak-origin centroid, so drift is not
+        recoverable at this boundary; it is set to the neutral value and
+        documented as such.  The organ's own digest path derives drift in
+        :meth:`ResidualDigester._motif_for`, where the streak origin *is*
+        available, and that is the value the motif gate uses.
         """
         if isinstance(motif, StructuralMotif):
             return motif
-        if isinstance(motif, CohortRecord):
+        if hasattr(motif, "cohort_id") and hasattr(motif, "kind"):
             if motif.kind != "motif":
                 raise ValueError(
                     f"adopt_motif needs a motif cohort, got {motif.kind!r}"
                 )
             return StructuralMotif(
-                motif_id=motif.cohort_id,
-                debris_id=motif.body_id,
+                motif_id=str(motif.cohort_id),
+                debris_id=str(getattr(motif, "body_id", motif.cohort_id)),
                 centroid=np.asarray(motif.centroid, dtype=np.float64),
                 count=int(motif.count),
                 spread=float(motif.spread),

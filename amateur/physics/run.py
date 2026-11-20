@@ -438,36 +438,27 @@ class PhysicsSource:
         """#24: the live overlay, fitted/revalidated from the ``#21`` motif.
 
         The motif is read from D3 with the same call the executor's ``#21``
-        derivation uses (``board.debris.best_motif()``) and normalised to
-        the organ's :class:`StructuralMotif` shape with the same field
-        mapping, so the body's ``motif_lineage`` equals the motif id the
-        executor consumed this tick (its lineage gate asserts exactly that).
-        A tick with no motif, or an adoption the ratchet refuses (cooldown,
-        another active overlay, capacity), emits ``noop_overlay()``.
+        derivation uses (``board.debris.best_motif()``) and handed to the
+        organ **as the cohort the executor actually read**; the organ's
+        ``_as_structural_motif`` normalises it (and is the one place that
+        states the cohort model carries no drift field).  No field is
+        fabricated here, so the body's ``motif_lineage`` equals the motif id
+        the executor consumed this tick (its lineage gate asserts exactly
+        that).  A tick with no motif, or an adoption the ratchet refuses
+        (cooldown, another active overlay, capacity), emits
+        ``noop_overlay()``.
         """
         motif_cohort = debris.best_motif()
         if motif_cohort is None:
             return noop_overlay()
-        motif = StructuralMotif(
-            motif_id=str(motif_cohort.cohort_id),
-            debris_id=str(motif_cohort.cohort_id),
-            centroid=np.asarray(motif_cohort.centroid, dtype=np.float64),
-            count=int(motif_cohort.count),
-            spread=float(motif_cohort.spread),
-            persistence=max(
-                0, int(motif_cohort.last_tick) - int(motif_cohort.first_tick)
-            ),
-            drift=0.0,
-            first_tick=int(motif_cohort.first_tick),
-            last_tick=int(motif_cohort.last_tick),
-        )
-        self.last_motif_id = motif.motif_id
-        record = self.organ.adopt_motif(motif, int(tick))
+        motif_id = str(motif_cohort.cohort_id)
+        self.last_motif_id = motif_id
+        record = self.organ.adopt_motif(motif_cohort, int(tick))
         self.last_adoption = record
         if record is None:
             return noop_overlay()
         epoch, overlay_id, status = record.token()
-        return MatOverlay(epoch, overlay_id, status, motif_lineage=motif.motif_id)
+        return MatOverlay(epoch, overlay_id, status, motif_lineage=motif_id)
 
     # ------------------------------------------------------- shadow evidence
     def shadow_evidence(self, tick: int) -> dict[str, tuple[float, float]]:

@@ -1017,7 +1017,7 @@ class TestPhysicsBodies(unittest.TestCase):
             _candidate(),
             _debris("debris-001", (_cohort("m1", "motif"),)),
             StructuralMotifBody(
-                "motif-001", "debris-001", (0.0,) * 64, 4, 1.0, 4, 0.0, 1, 4
+                "motif-001", "debris-001", (0.0,) * 64, 4, 1.0, 4, 1, 4
             ),
             ScaffoldsBody((_cohort("s1", "scaffold"),)),
             AvoidanceTrailsBody((_cohort("t1", "trail"),)),

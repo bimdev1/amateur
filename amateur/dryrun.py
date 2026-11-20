@@ -518,7 +518,6 @@ class DryRun:
                     count=motif.count,
                     spread=motif.spread,
                     persistence=max(0, motif.last_tick - motif.first_tick),
-                    drift=0.0,
                     first_tick=motif.first_tick,
                     last_tick=motif.last_tick,
                 ),
