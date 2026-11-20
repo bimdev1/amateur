@@ -214,7 +214,7 @@ class TestLeanCompiles(unittest.TestCase):
             "attempts_at_master",
             "balance_at_master",
             "geometry_write_channel_purity",
-            "geometry_writes_anchored",
+            "geometry_writes_absorbed",
             "matTick_length",
             "mat_operational_policy",
             "mat_fresh_policy",
@@ -262,7 +262,7 @@ class TestLeanCompiles(unittest.TestCase):
             "def d4WriteFids : List Nat := [22]", text
         )
         self.assertIn(
-            "def d2WriteFids : List Nat := [23, 24]", text
+            "def d2WriteFids : List Nat := [18, 24]", text
         )
         self.assertIn("rev.length > 4", text)
 

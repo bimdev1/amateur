@@ -82,10 +82,21 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(D2_FLOWS, store_flows("D2"))
         self.assertEqual(D4_FLOWS, store_flows("D4"))
 
-    def test_write_channels_are_ratchet_owned(self) -> None:
+    def test_write_channels_are_the_two_geometry_stores(self) -> None:
+        """Round 10: D2's writes are #18 (the loop's candidate birth, 3.0)
+        and #24 (the ratchet's revalidated overlay); D4's sole write is
+        #22 (the ratchet).  The prior "all writes are ratchet-owned"
+        reading is withdrawn, and the whitelists are unchanged."""
+        owners = {
+            fid: next(f for f in FLOW_LEDGER if f.fid == fid).source
+            for fid in D2_WRITES | D4_WRITES
+        }
+        self.assertEqual(sorted(D2_WRITES), [18, 24])
+        self.assertEqual(sorted(D4_WRITES), [22])
+        self.assertEqual(owners[18], "3.0 Execute Observation Loop")
+        self.assertEqual(owners[22], "6.0 Ratchet & Sediment Grammar")
+        self.assertEqual(owners[24], "6.0 Ratchet & Sediment Grammar")
         for fid in D2_WRITES | D4_WRITES:
-            flow = next(f for f in FLOW_LEDGER if f.fid == fid)
-            self.assertEqual(flow.source, "6.0 Ratchet & Sediment Grammar")
             self.assertIn(fid, WRITE_FLOWS)
 
     def test_schema_covers_every_flow(self) -> None:
@@ -347,7 +358,6 @@ class TestPhysicsBodies(unittest.TestCase):
             LatentRolloutBody(((0.0,) * 64,) * 4),
             StateDeltaBody((0.0,) * 64, 0.5),
             CollapseMandateBody("ceiling-pressure", 8, 8, 7, "debris-001", 3),
-            EmergentCrystalBody((0.0,) * 64, 0.5, 3),
             _digest_body(),
             StructuralMotifBody("motif-001", "debris-001", (0.0,) * 64, 4, 1.0, 4, 0.0, 1, 4),
         ]
@@ -380,8 +390,10 @@ class TestPhysicsBodies(unittest.TestCase):
 
 
 def _fid_for_body(body: object) -> int:
+    # Round 10: #18's channel is a MatOverlay (the D2 candidate), so the old
+    # EmergentCrystalBody no longer has a ledger channel to travel.
     for fid, body_type in REAL_BODIES.items():
-        if type(body) is body_type:
+        if type(body) is body_type and fid != 18:
             return fid
     if type(body) is MatOverlay:
         return 23

@@ -5,7 +5,7 @@ every envelope in ``DryRun._derive`` before arrival (no payload is minted
 at emit time), so nothing here claims the physics-epoch gate is closed.
 What is pinned:
 
-- ``Provenance`` validation: ``source_fid`` is a ledger flow id (1..26),
+- ``Provenance`` validation: ``source_fid`` is a ledger flow id (1..27),
   ``tick_born`` is a non-negative tick, the record is frozen and hashable;
 - the emission invariant ``tick_born <= emit_tick``, and an explicit
   record of its limit (same-tick birth passes: ordering is a tripwire, not
@@ -67,7 +67,7 @@ def _overlay(tick: int = 1, oid: str = "cry-1") -> MatOverlay:
 
 class TestProvenanceRecord(unittest.TestCase):
     def test_flow_ids_are_exactly_the_ledger(self) -> None:
-        self.assertEqual(FLOW_IDS, frozenset(range(1, 27)))
+        self.assertEqual(FLOW_IDS, frozenset(range(1, 28)))
         self.assertEqual(
             FLOW_IDS, frozenset(flow.fid for flow in FLOW_LEDGER)
         )
@@ -78,7 +78,7 @@ class TestProvenanceRecord(unittest.TestCase):
             self.assertEqual((prov.source_fid, prov.tick_born), (fid, 0))
 
     def test_invalid_source_fid_rejected(self) -> None:
-        for bad in (0, 27, -1, 1.0, "1", None, True):
+        for bad in (0, 28, -1, 1.0, "1", None, True):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 Provenance(bad, 0)  # type: ignore[arg-type]
 

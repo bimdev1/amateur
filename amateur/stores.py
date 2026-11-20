@@ -17,12 +17,15 @@ from .events import (
     BoardOps,
     ConsumedScaffolds,
     DigestedDebris,
+    DissipatedEntropy,
+    EmergentCrystals,
     EvictedClusters,
     MatOverlays,
     RatchetedOverlays,
     SedimentedInvariants,
     SlotState,
     StateDeltas,
+    StructuralMotifs,
     StaleOverlays,
     SurvivingCrystals,
 )
@@ -58,23 +61,29 @@ class ElasticBoard(ABC):
 
 
 class MultiLayerMat(ABC):
-    """D2 — density field over possible transitions; biases routing."""
+    """D2 — the nursery: candidate density field, biases routing."""
 
     @abstractmethod
     def mat_overlays(self) -> MatOverlays:
         """Flow #8: 'Density modifies the next transition'."""
 
     @abstractmethod
-    def lay_crystals(self, crystals: SurvivingCrystals) -> None:
-        """Flow #23: ratchet-approved crystals become new layers."""
+    def birth_crystals(self, crystals: EmergentCrystals) -> None:
+        """Flow #18: the loop's emergent crystal enters the nursery as a
+        candidate layer (round-10 PROVISIONAL reading; the crystal lexicon
+        and this payload shape await adjudication)."""
 
     @abstractmethod
     def lay_overlays(self, overlays: RatchetedOverlays) -> None:
         """Flow #24: ratcheted overlays harden into the mat."""
 
     @abstractmethod
+    def surviving_crystals(self) -> SurvivingCrystals:
+        """Flow #23: hand survivors to the ratchet for sediment/write-back."""
+
+    @abstractmethod
     def stale_overlays(self) -> StaleOverlays:
-        """Flow #25: hand stale overlays to the ratchet for review."""
+        """Flow #25: hand stale overlays to digestion for review."""
 
 
 class BaseCore(ABC):
@@ -103,6 +112,14 @@ class DebrisPool(ABC):
         """Flow #20: recyclable scaffolds back to the digester."""
 
     @abstractmethod
+    def structural_motifs(self) -> StructuralMotifs:
+        """Flow #21: the ratchet mines motifs from the pool (round 10)."""
+
+    @abstractmethod
     def avoidance_trails(self) -> AvoidanceTrails:
         """Flow #26: 'prior deformation alters subsequent deformation' —
         trails enter routing as bias, not as instruction."""
+
+    @abstractmethod
+    def dissipated_entropy(self) -> DissipatedEntropy:
+        """Flow #27: degraded throughput drains back to the boundary."""

@@ -43,14 +43,17 @@ class TestSeparationOfTimescales(TopologyMixin, unittest.TestCase):
     sediment timescale."""
 
     def test_only_the_ratchet_writes_the_base_core(self) -> None:
-        self._written_by("D4")
+        writers = {src for src, _, dst in ledger.edges() if dst == "D4"}
+        self.assertEqual(writers, {"P6"}, msg="unauthorized writer of D4")
 
-    def test_only_the_ratchet_writes_the_mat(self) -> None:
-        self._written_by("D2")
-
-    def _written_by(self, store: str) -> None:
-        writers = {src for src, _, dst in ledger.edges() if dst == store}
-        self.assertEqual(writers, {"P6"}, msg=f"unauthorized writer of {store}")
+    def test_the_nursery_has_two_owners(self) -> None:
+        """Round 10: D2 is a nursery, not a ratchet-only store.  The loop
+        births the candidate (#18) and the ratchet writes the revalidated
+        overlay (#24); D4 stays the only ratchet-exclusive store."""
+        writers = {
+            src for src, _, dst in ledger.edges() if dst == "D2"
+        }
+        self.assertEqual(writers, {"P3", "P6"}, msg="unauthorized writer of D2")
 
 
 class TestTheCoreCarriesNoTrajectories(TopologyMixin, unittest.TestCase):
@@ -58,16 +61,26 @@ class TestTheCoreCarriesNoTrajectories(TopologyMixin, unittest.TestCase):
     the core': the observation loop feels long-term geometry only through
     routing's bias (#7, #8, #26) and never touches it directly."""
 
-    def test_observer_never_touches_geometry_or_entities(self) -> None:
+    def test_observer_births_candidates_but_touches_no_frozen_geometry(self) -> None:
+        """Round 10 corrects the old "never touches D2" clause: 3.0 births
+        the emergent crystal into the nursery (#18).  What survives is the
+        real separation: the loop never touches the frozen base core (D4),
+        never reaches an entity, and never hardens the mat itself."""
         touch = {dst for src, _, dst in ledger.edges() if src == "P3"}
         touch |= {src for src, _, dst in ledger.edges() if dst == "P3"}
-        self.assertFalse(touch & {"D2", "D4"}, msg=touch)
+        self.assertNotIn("D4", touch, msg=touch)
         self.assertFalse(touch & {"E1", "E2"}, msg=touch)
+        self.assertIn("D2", touch, msg="the corrected #18 birth is missing")
 
     def test_blanket_receives_only_crossings_and_resolutions(self) -> None:
         self.assertEqual(
             ledger.inbound(ledger.P1),
-            ("Gradients", "Perturbations", "Resolved Trajectory"),
+            (
+                "Gradients",
+                "Perturbations",
+                "Resolved Trajectory",
+                "Dissipated Entropy (read)",
+            ),
         )
 
 
@@ -75,10 +88,15 @@ class TestDebrisDiscipline(TopologyMixin, unittest.TestCase):
     """Debris is recycled through digestion and biases routing; it never
     decorates the core and never reaches the entities."""
 
-    def test_debris_pool_serves_only_digestion_and_routing(self) -> None:
+    def test_debris_pool_serves_reuse_and_dissipation(self) -> None:
+        """Round 10: the corrected ASCII routes D3 to the digester, the
+        regulator (#20 scaffolds), the ratchet (#21 motifs), routing (#26
+        trails) and back out through the boundary (#27 dissipated entropy).
+        The pool never reaches the entities or the frozen base core."""
         touch = {dst for src, _, dst in ledger.edges() if src == "D3"}
         touch |= {src for src, _, dst in ledger.edges() if dst == "D3"}
-        self.assertEqual(touch, {"P5", "P2"})
+        self.assertEqual(touch, {"P1", "P2", "P4", "P5", "P6"})
+        self.assertFalse(touch & {"E1", "E2", "D4"})
 
 
 class TestCarrierSemantics(unittest.TestCase):
@@ -101,36 +119,56 @@ class TestCarrierSemantics(unittest.TestCase):
 
 
 class TestCrystalLexicon(unittest.TestCase):
-    """The resolved #18 disambiguation, pinned so it cannot silently
-    reopen: candidate / extracted-rule / vetted are three different terms
-    on three different edges, and the ledger wiring matches the lexicon."""
-
-    RESOLVED = "#18, RESOLVED"
+    """The round-10 audit record, pinned so the correction cannot silently
+    reopen.  The old lexicon (candidate into 5.0, motif out of 5.0,
+    survivor `6.0 -> D2`) was built on the drifted transcription; the
+    corrected ASCII reading is the spec and the lexicon is explicitly
+    marked as being rewritten / not authoritative."""
 
     def _doc(self) -> str:
         path = Path(__file__).resolve().parents[1] / "v0.10-untested.md"
         return path.read_text()
 
-    def test_resolution_is_on_record(self) -> None:
+    def test_audit_record_is_on_file(self) -> None:
         doc = self._doc()
-        self.assertIn(self.RESOLVED, doc)
-        self.assertIn("Lexicon pinned", doc)
-        self.assertIn("Falsifier on record", doc)
-        for term in (
-            "*Emergent Crystal* = candidate (3.0 -> 5.0)",
-            "*Structural Motif* =\n  extracted rule (5.0 -> 6.0)",
-            "*Surviving Crystal* = vetted, ratcheted\n  structure (6.0 -> D2)",
+        self.assertIn("Round 10 audit record", doc)
+        for corrected in (
+            "**3.0 → 5.0**",        # #16
+            "**3.0 → D2**",         # #18
+            "**D3 → 4.0**",         # #20
+            "**D3 → 6.0 (read)**",  # #21
+            "**D2 → 6.0 (read)**",  # #23
+            "**D2 → 5.0**",         # #25
+            "**D3 → 1.0 (read), restored**",  # #27
         ):
-            self.assertIn(term, doc)
+            self.assertIn(corrected, doc)
 
-    def test_ledger_matches_the_lexicon(self) -> None:
+    def test_ledger_matches_the_corrected_reading(self) -> None:
         flow = {f.fid: f for f in ledger.FLOW_LEDGER}
+        self.assertEqual(flow[16].source, ledger.P3)
+        self.assertEqual(flow[16].target, ledger.P5)
         self.assertEqual(flow[18].source, ledger.P3)
-        self.assertEqual(flow[18].target, ledger.P5)
-        self.assertEqual(flow[21].source, ledger.P5)
+        self.assertEqual(flow[18].target, ledger.D2)
+        self.assertEqual(flow[20].source, ledger.D3)
+        self.assertEqual(flow[20].target, ledger.P4)
+        self.assertEqual(flow[21].source, ledger.D3)
         self.assertEqual(flow[21].target, ledger.P6)
-        self.assertEqual(flow[23].source, ledger.P6)
-        self.assertEqual(flow[23].target, ledger.D2)
+        self.assertEqual(flow[23].source, ledger.D2)
+        self.assertEqual(flow[23].target, ledger.P6)
+        self.assertEqual(flow[25].source, ledger.D2)
+        self.assertEqual(flow[25].target, ledger.P5)
+        self.assertEqual(flow[27].source, ledger.D3)
+        self.assertEqual(flow[27].target, ledger.P1)
+        # 5.0 -> 6.0 no longer exists.
+        self.assertFalse(
+            [(src, dst) for src, _, dst in ledger.edges()
+             if src == "P5" and dst == "P6"]
+        )
+
+    def test_old_lexicon_is_recorded_as_superseded(self) -> None:
+        doc = self._doc()
+        self.assertIn("Superseded readings", doc)
+        self.assertNotIn("Lexicon pinned", doc)
 
 
 if __name__ == "__main__":

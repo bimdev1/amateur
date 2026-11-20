@@ -65,6 +65,7 @@ def opsOf : Nat -> List Op
   | 24 => [Op.emit, Op.consume]
   | 25 => [Op.emit, Op.consume]
   | 26 => [Op.emit, Op.consume]
+  | 27 => [Op.emit, Op.consume]
   | _ => []
 
 /-- Channel state: mailbox depth plus the scalar charge and accounting
@@ -214,9 +215,10 @@ theorem warm_noncycle : ∀ i : Nat, i ≠ 10 → i ≠ 17 →
   | 24 => intro _ _; exact ⟨rfl, rfl, rfl, rfl⟩
   | 25 => intro _ _; exact ⟨rfl, rfl, rfl, rfl⟩
   | 26 => intro _ _; exact ⟨rfl, rfl, rfl, rfl⟩
-  | j + 27 =>
+  | 27 => intro _ _; exact ⟨rfl, rfl, rfl, rfl⟩
+  | j + 28 =>
       intro _ _
-      have h : ¬ (j + 27 = 2 ∨ j + 27 = 4 ∨ j + 27 = 5) := by omega
+      have h : ¬ (j + 28 = 2 ∨ j + 28 = 4 ∨ j + 28 = 5) := by omega
       simp only [fsinkone, if_neg h]
       exact ⟨rfl, rfl, rfl, rfl⟩
 
@@ -564,7 +566,7 @@ theorem flow_event (i x : Nat) :
   exact h0
 
 /-- INV-LIVENESS: every ledger flow emits exactly once per tick. -/
-theorem emit_liveness : ∀ i : Nat, 1 ≤ i → i < 27 → emitCount (opsOf i) = 1 := by
+theorem emit_liveness : ∀ i : Nat, 1 ≤ i → i < 28 → emitCount (opsOf i) = 1 := by
   intro i h1 hi
   match i with
   | 0 => omega
@@ -594,10 +596,11 @@ theorem emit_liveness : ∀ i : Nat, 1 ≤ i → i < 27 → emitCount (opsOf i) 
   | 24 => rfl
   | 25 => rfl
   | 26 => rfl
-  | j + 27 => omega
+  | 27 => rfl
+  | j + 28 => omega
 
 /-- Every flow either consumes or drains as a sink, exactly once. -/
-theorem consume_sink_split : ∀ i : Nat, 1 ≤ i → i < 27 →
+theorem consume_sink_split : ∀ i : Nat, 1 ≤ i → i < 28 →
     consumeCount (opsOf i) + fsinkone i = 1 := by
   intro i h1 hi
   match i with
@@ -628,9 +631,10 @@ theorem consume_sink_split : ∀ i : Nat, 1 ≤ i → i < 27 →
   | 24 => rfl
   | 25 => rfl
   | 26 => rfl
-  | j + 27 => omega
+  | 27 => rfl
+  | j + 28 => omega
 
-theorem step_used : ∀ i : Nat, 1 ≤ i → i < 27 →
+theorem step_used : ∀ i : Nat, 1 ≤ i → i < 28 →
     (tickFlow i (fbox i)).used = 1 := by
   intro i h1 hi
   have h0 := flow_attempts_raw i (fbox i)
@@ -647,7 +651,7 @@ theorem step_consumed : ∀ i : Nat,
 
 /-- Identity A at the master profile: attempted = accepted + refused,
 and the canonical schedule refuses nothing (attempted = accepted = 1). -/
-theorem attempts_at_master : ∀ i : Nat, 1 ≤ i → i < 27 →
+theorem attempts_at_master : ∀ i : Nat, 1 ≤ i → i < 28 →
     (tickFlow i (fbox i)).refused + (tickFlow i (fbox i)).used = 1 := by
   intro i h1 hi
   have h0 := flow_attempts_raw i (fbox i)
@@ -657,7 +661,7 @@ theorem attempts_at_master : ∀ i : Nat, 1 ≤ i → i < 27 →
 /-- Identity B at the master profile: accepted = consumed + sunk +
 depth, per flow per tick (delta-depth = box' - fbox i; delta-sunk =
 fsinkone i since the sunk counter enters each tick at zero). -/
-theorem balance_at_master : ∀ i : Nat, 1 ≤ i → i < 27 →
+theorem balance_at_master : ∀ i : Nat, 1 ≤ i → i < 28 →
     (tickFlow i (fbox i)).used + fbox i
       = (tickFlow i (fbox i)).consumed + (tickFlow i (fbox i)).sunk
           + (tickFlow i (fbox i)).box := by
@@ -669,9 +673,10 @@ theorem balance_at_master : ∀ i : Nat, 1 ≤ i → i < 27 →
 
 Payload schema (user-adjudicated):
 
-- D2 (Multi-Layer Mat) writes [23, 24] carry epoch-stamped
-  overlays; the #25 stale read pairs with each #24 ratchet write in the
-  same stage;
+- D2 (Multi-Layer Mat) writes [18, 24] carry epoch-stamped
+  overlays: #18 is the loop's candidate birth (3.0 -> D2, PROVISIONAL
+  round 10) and #24 the ratchet's revalidated overlay; the #23 surviving
+  -crystal read and the #25 stale read take the stored records;
 - D4 (Base Core) write [22] carries bias primitives only.
   The whitelist closes the channel by construction: a trajectory,
   state-delta, or context payload kind is not forbidden on D4 -- it is
@@ -690,7 +695,7 @@ def forbiddenOfGeometry : List PayloadKind :=
   [PayloadKind.traj, PayloadKind.delta, PayloadKind.ctx]
 
 def d4WriteFids : List Nat := [22]
-def d2WriteFids : List Nat := [23, 24]
+def d2WriteFids : List Nat := [18, 24]
 
 /-- INV-EMPTINESS as a type-level fact: the forbidden kinds are excluded
 from every geometry write channel. -/
@@ -699,13 +704,16 @@ theorem geometry_write_channel_purity :
   intro k hk
   cases k <;> simp_all [d4Allowed, d2Allowed, forbiddenOfGeometry]
 
-/-- Both geometry write channels are ratchet-owned flows, absorbed
-(compiled to consume) on the spine. -/
-theorem geometry_writes_anchored :
-    d4WriteFids = [22] ∧ d2WriteFids = [23, 24] ∧
+/-- Both geometry write channels are absorbed (compiled to consume) on
+the spine.  Round 10: only #22/#24 are ratchet-owned; #18 is owned by
+the loop (3.0 -> D2 births the candidate), so the prior "ratchet-owned"
+reading is withdrawn. -/
+theorem geometry_writes_absorbed :
+    d4WriteFids = [22] ∧ d2WriteFids = [18, 24] ∧
       (opsOf 22).getLast? = some Op.consume ∧
-      (opsOf 23).getLast? = some Op.consume :=
-  ⟨rfl, rfl, by decide, by decide⟩
+      (opsOf 18).getLast? = some Op.consume ∧
+      (opsOf 24).getLast? = some Op.consume :=
+  ⟨rfl, rfl, by decide, by decide, by decide⟩
 
 /-- One mat tick: birth appended, head recycled at the current epoch,
 then an eviction iff the board exceeds capacity 4. -/

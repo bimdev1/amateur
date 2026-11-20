@@ -8,7 +8,9 @@ payloads carry epochs, and the `MatBoard` lifecycle guarantees no resident
 overlay's epoch falls more than one tick behind the present.
 
 Schema (user-adjudicated):
-- D2 payloads: (epoch, overlay_id, status in {active, stale});
+- D2 payloads: (epoch, overlay_id, status in {active, stale, candidate});
+  `candidate` is the Round-10 PROVISIONAL birth status for #18 (an
+  emergent crystal entering the nursery, not yet vetted by 6.0);
 - D4 payloads: (bias_primitive, confidence in [0, 1]); trajectory,
   state-delta, and context types are excluded by the whitelist;
 - the phase-4/5 real flows carry frozen, hashable body records (see the
@@ -91,8 +93,14 @@ class MatOverlay:
     def __post_init__(self) -> None:
         if self.epoch < 0:
             raise ValueError(f"epoch must be >= 0, got {self.epoch}")
-        if self.status not in ("active", "stale"):
-            raise ValueError(f"status must be active|stale, got {self.status!r}")
+        #: PROVISIONAL round 10: ``candidate`` is the #18 birth status of the
+        #: corrected graph (an unvetted emergent crystal in the nursery);
+        #: ``active``/``stale`` remain the vetted lifecycle.  Pending user
+        #: adjudication of the crystal lexicon and #18's payload shape.
+        if self.status not in ("active", "stale", "candidate"):
+            raise ValueError(
+                f"status must be active|stale|candidate, got {self.status!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -430,7 +438,7 @@ def noop_mandate() -> CollapseMandateBody:
 
 
 def noop_overlay() -> MatOverlay:
-    """The #23/#24 no-event token: a real MatOverlay the mat ignores."""
+    """The #18/#24 write no-event token: a real MatOverlay the mat ignores."""
     return MatOverlay(0, NOOP_OVERLAY_ID, "stale")
 
 
@@ -544,7 +552,7 @@ class MatBoard:
     *tested-not-proven* against the Lean bounds.
 
     Cadence honesty: the one-birth-per-tick minting schedule is dry-run
-    plumbing; in the physics epoch #23/#24 are organ-owned and sentinel
+    plumbing; in the physics epoch #18/#24 are organ-owned and sentinel
     no-ops fill the fixed cadence. The Lean theorems that consume this
     policy quantify over every stream obeying the same update law
     (`mat_*_policy`), so a different schedule is a different law, never a

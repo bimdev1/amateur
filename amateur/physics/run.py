@@ -53,16 +53,13 @@ from ..payloads import (
     BiasPrimitive,
     CollapseMandateBody,
     DigestedDebrisBody,
-    EmergentCrystalBody,
     FrameBody,
     LatentRolloutBody,
     MatOverlay,
     PredictionErrorBody,
     StateDeltaBody,
-    StructuralMotifBody,
     noop_debris,
     noop_mandate,
-    noop_motif,
     noop_overlay,
 )
 from ..provenance import Envelope
@@ -112,17 +109,18 @@ class PhysicsSource:
             for fid in sorted(NON_READ_FLOWS)
         }
         #: Fixed derivation dispatch; not consulted through ``coverage``.
+        #: Round 10 (spec correction): #18 is the loop's D2 birth of the
+        #: candidate crystal (was #23), #23 is now an executor-derived D2
+        #: store read, and #21 is a D3 store read (no derived body yet).
         self._derivers = {
             3: self._frame,
             6: self._prediction_error,
             10: self._rollout,
             12: self._state_delta,
             17: self._mandate,
-            18: self._crystal,
+            18: self._candidate,
             19: self._debris,
-            21: self._motif,
             22: self._gate,
-            23: self._birth_token,
             24: self._revalidation_token,
         }
         self._frame_body: FrameBody | None = None
@@ -234,14 +232,6 @@ class PhysicsSource:
             tick=int(mandate.tick),
         )
 
-    def _crystal(self, tick: int, board: Any) -> EmergentCrystalBody:
-        observation, _ = self._require_context()
-        return EmergentCrystalBody(
-            residual=_vector(observation.residual),
-            surprise=float(observation.surprise),
-            tick=int(observation.tick),
-        )
-
     def _debris(self, tick: int, board: Any) -> DigestedDebrisBody:
         _, digest = self._require_context()
         body = digest.created
@@ -262,23 +252,6 @@ class PhysicsSource:
             peak_surprise=float(body.peak_surprise),
         )
 
-    def _motif(self, tick: int, board: Any) -> StructuralMotifBody:
-        _, digest = self._require_context()
-        motif = digest.motif
-        if motif is None:
-            return noop_motif()
-        return StructuralMotifBody(
-            motif_id=motif.motif_id,
-            debris_id=motif.debris_id,
-            centroid=_vector(motif.centroid),
-            count=int(motif.count),
-            spread=float(motif.spread),
-            persistence=int(motif.persistence),
-            drift=float(motif.drift),
-            first_tick=int(motif.first_tick),
-            last_tick=int(motif.last_tick),
-        )
-
     def _gate(self, tick: int, board: Any) -> BiasPrimitive:
         """The real #22 ratchet gate's derived output (Q4).
 
@@ -297,8 +270,17 @@ class PhysicsSource:
             return BiasPrimitive("ratchet-gate-passed", float(confidence))
         return BiasPrimitive("ratchet-gate-blocked", 0.0)
 
-    def _birth_token(self, tick: int, board: Any) -> MatOverlay:
-        """The #23 birth token, with the attached patch pre-validated.
+    def _candidate(self, tick: int, board: Any) -> MatOverlay:
+        """The #18 candidate token, with the attached patch pre-validated.
+
+        PROVISIONAL round 10: the corrected graph births the emergent
+        crystal into the nursery at #18 (3.0 -> D2) instead of at #23, so
+        the record is marked ``candidate`` -- not yet vetted by 6.0.  The
+        payload shape and the timing of the predictor patch are pending
+        user adjudication of the crystal lexicon; the Q1-A substance
+        checks (patch present, per-patch and table byte ceilings) are kept
+        here, in the derivation pass, so an unpatched or oversized birth
+        still fails before any arrival, commit, or charge.
 
         Q1 atomicity: ``_absorb_writes`` commits the birth before the
         one-way ``on_commit`` attaches the patch, so a patch that violates
@@ -348,7 +330,8 @@ class PhysicsSource:
             self.organ.prune_overlays(frozenset())
             raise
         self._pending_births.pop(0)
-        return MatOverlay(*record.token())
+        epoch, overlay_id, _status = record.token()
+        return MatOverlay(epoch, overlay_id, "candidate")
 
     def _revalidation_token(self, tick: int, board: Any) -> MatOverlay:
         self._pending_revalidations = [
@@ -372,13 +355,18 @@ class PhysicsSource:
     ) -> None:
         """One-way post-commit notification (Q2-3, Q1-A).
 
-        On #23/#24 the store has already committed the record; the source
+        On #18/#24 the store has already committed the record; the source
         attaches the matching predictor patch (or asserts if the organ has
-        none).  On the post-eviction notifications (#19/#22) it prunes the
+        none).  PROVISIONAL round 10: the task calls the #18 record a
+        candidate and asks for no predictor patch on candidates; the Q1-A
+        absorb path still attaches the validated organ patch here, because
+        dropping it would leave the D2 substance accounting unowned.  This
+        is an open adjudication, not a settled reading.
+        On the post-eviction notifications (#19/#22) it prunes the
         organ/store to the resident set so no overlay-side retention
         survives a D2 eviction.
         """
-        if fid in (23, 24) and type(envelope.body) is MatOverlay and \
+        if fid in (18, 24) and type(envelope.body) is MatOverlay and \
                 envelope.body.overlay_id != NOOP_OVERLAY_ID:
             overlay_id = envelope.body.overlay_id
             patch = self.organ.overlay_table.adapter(overlay_id)

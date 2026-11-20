@@ -774,3 +774,13 @@ round's recorded failure.
    what `#14` reported — the honest evidence available. The post-commit
    occupancy becomes visible as `#14` on the next tick. A "cost + nbytes"
    projection would be a prediction, not derivation, and is refused.
+
+> **Round-10 supersession note (2026-11-20).** The ledger was corrected to
+> 27 flows after the ASCII audit (#16 P3->P5, #18 P3->D2, #20 D3->P4, #21
+> D3->P6 read, #23 D2->P6 read, #25 D2->P5, #27 D3->P1 restored). Phase 1 of
+> this slice (D1 store + regulator) is committed and unaffected: D1's flows
+> (#13/#14/#15) did not move. The coverage arithmetic in this memo
+> (14/26, 17/26) is stale and must be re-derived against the 27-flow ledger
+> before phase 2 starts; #16 is now 3.0's output, not 4.0's, so the
+> regulator's #16 claim and the `evidence[12]` mapping need re-reading too.
+> Phase 2 remains blocked by the user's deferral of #13/#16 work.

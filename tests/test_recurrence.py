@@ -11,18 +11,20 @@ Domain results asserted here:
   into P1) — hence the port condensation is the four-edge dag
   {E1 -> core, E2 -> core, core -> E1, core -> E2}.
 - Over the interior subgraph, the node-canonical simple cycles are
-  exactly the expected seventeen: the perception loop through P1, the
-  whiteboard pair (P4, P5), and per store D, the loops that close
-  through it. Raw membership is D1 in seven, D2 in four, D3 in four,
-  D4 in three (each store's cycles include its bare D<->P pair except
-  D4, and three cycles bridge D1 through P6 into D2/D3/D4); membership
-  counts overlap there, which sums to twenty over seventeen distinct
-  cycles. The Base Core D4 is the only store with no 2- or 3-hop loop.
+  exactly the expected twenty-four (round 10, corrected ledger).  The
+  store memberships overlap: D1 in twelve, D2 in eleven, D3 in fifteen,
+  D4 in four.  The Base Core D4 remains the only store with no 2- or
+  3-hop loop (its shortest cycle is five hops); the corrected graph gives
+  D2 two distinct one-hop exits (#23 read, #24 write) and restores D3's
+  exit into the boundary (#27), which is why the census grew.
 - Thermodynamic law at the boundary: every simple cycle of the full
   graph that touches an entity necessarily carries both a fresh input
   (#1 or #3) and a lateral output (#2, #4, or #5). The driving gradient
   itself never returns in a cycle ("Emptiness": it passes through
-  organization and leaves degraded).
+  organization and leaves degraded).  Round 10 restores #27 (D3 -> P1,
+  marked read) as a residue edge *into* the transducer; the dissipation
+  exit does not create an entity cycle of its own (P1 still leaves only
+  through #2/#4/#5), which the entity-cycle test re-checks.
 """
 from __future__ import annotations
 
@@ -51,25 +53,31 @@ FRESH_INPUT_FLOWS = (1, 3)
 LATERAL_OUTPUT_FLOWS = (2, 4, 5)
 
 EXPECTED_CYCLES = {
+    ("D1", "P3", "D2", "P5", "D3", "P4"),
+    ("D1", "P3", "D2", "P5", "P4"),
     ("D1", "P3", "P4"),
+    ("D1", "P3", "P5", "D3", "P4"),
     ("D1", "P3", "P5", "P4"),
     ("D1", "P4"),
+    ("D1", "P5", "D3", "P1", "P2", "P3", "P4"),
     ("D1", "P5", "D3", "P2", "P3", "P4"),
+    ("D1", "P5", "D3", "P4"),
+    ("D1", "P5", "D3", "P6", "D2", "P2", "P3", "P4"),
+    ("D1", "P5", "D3", "P6", "D4", "P2", "P3", "P4"),
     ("D1", "P5", "P4"),
-    ("D1", "P5", "P6", "D2", "P2", "P3", "P4"),
-    ("D1", "P5", "P6", "D4", "P2", "P3", "P4"),
-    ("D2", "P2", "P3", "P4", "P5", "P6"),
-    ("D2", "P2", "P3", "P5", "P6"),
+    ("D2", "P2", "P3"),
+    ("D2", "P2", "P3", "P5", "D3", "P6"),
+    ("D2", "P5", "D3", "P1", "P2", "P3"),
+    ("D2", "P5", "D3", "P2", "P3"),
+    ("D2", "P5", "D3", "P6"),
+    ("D2", "P5", "D3", "P6", "D4", "P2", "P3"),
     ("D2", "P6"),
-    ("D3", "P2", "P3", "P4", "P5"),
+    ("D2", "P6", "D4", "P2", "P3"),
+    ("D3", "P1", "P2", "P3", "P5"),
     ("D3", "P2", "P3", "P5"),
-    ("D3", "P5"),
-    ("D4", "P2", "P3", "P4", "P5", "P6"),
-    ("D4", "P2", "P3", "P5", "P6"),
+    ("D3", "P6", "D4", "P2", "P3", "P5"),
     ("P1", "P2", "P3"),
-    ("P4", "P5"),
 }
-
 EXPECTED_DAG = {
     ("E1", "CORE"),
     ("E2", "CORE"),
@@ -168,7 +176,7 @@ class TestRecurrentStructure(unittest.TestCase):
             store: sum(store in cycle for cycle in EXPECTED_CYCLES)
             for store in ("D1", "D2", "D3", "D4")
         }
-        self.assertEqual(counts, {"D1": 7, "D2": 4, "D3": 4, "D4": 3})
+        self.assertEqual(counts, {"D1": 12, "D2": 11, "D3": 15, "D4": 4})
 
     def test_inv_census_d4_has_no_short_loops(self) -> None:
         d4_hops = {

@@ -15,14 +15,14 @@ Provenance (A2, user-adjudicated): every accepted payload is an
 `amateur/provenance.py`). `PAYLOAD_SCHEMA` remains the exact-type *body*
 whitelist; the envelope is the transport gate at the channel boundary.
 `_derive()` runs once at the start of every tick and fills
-`self.derived` for all 26 fids from live node/store state; `_arrive()`
+`self.derived` for all 27 fids from live node/store state; `_arrive()`
 only reads that map, applies `require_channel_provenance`, and transports
 the envelope. `_payload_for` (the old emit-time minter) is gone. Store
 reads inherit the provenance of the stored record (D2 head, D4 sediment);
-writes are born at their emission tick; `MAT_SEED` is `(23, 0)`. The
-derivation pass does not make the synthetic bodies honest: #22's rotating
-confidence and #23's `cry-{tick}` remain synthetic (gate recorded
-PARTIAL) until physics derives them from #21/#25.
+writes are born at their emission tick; `MAT_SEED` is `("ovr-0", 0)`.
+The derivation pass does not make the synthetic bodies honest: #22's
+rotating confidence and #18's `cry-{tick}` candidate remain synthetic
+(gate recorded PARTIAL) until physics derives them from the digest.
 
 Channel semantics (user-adjudicated): reject-with-charge at capacity-1
 mailboxes. An arrival into an empty box is accepted; an arrival onto a
@@ -86,15 +86,20 @@ class Stage:
 
 
 SPINE: tuple[Stage, ...] = (
-    Stage("1.0 Transduce Markov Blanket", (1, 3, 10), (2, 4, 5, 6)),
+    Stage("1.0 Transduce Markov Blanket", (1, 3, 10, 27), (2, 4, 5, 6)),
     Stage("2.0 Route Without Ossification", (6, 7, 8, 26), (9,)),
-    Stage("3.0 Execute Observation Loop", (9, 11), (10, 12, 18)),
-    Stage("4.0 Allocate & Regulate Whiteboard", (12, 14, 17), (13, 16)),
-    Stage("5.0 Digest & Collapse Ceiling-Bound Units", (15, 16, 18, 20), (17, 19, 21)),
-    Stage("6.0 Ratchet & Sediment Grammar", (21, 25), (22, 23, 24)),
+    Stage("3.0 Execute Observation Loop", (9, 11), (10, 12, 16, 18)),
+    Stage("4.0 Allocate & Regulate Whiteboard", (12, 14, 17, 20), (13,)),
+    Stage("5.0 Digest & Collapse Ceiling-Bound Units", (15, 16, 25), (17, 19)),
+    Stage("6.0 Ratchet & Sediment Grammar", (21, 23), (22, 24)),
 )
 
-PER_TICK_INJECTIONS: tuple[int, ...] = (1, 3, 7, 8, 11, 14, 15, 20, 25, 26)
+#: Driving gradient (#1, #3) plus EVERY store read, corrected graph.
+#: (#23 is a D2 read now; #21/#27 are D3 reads -- injected with empty
+#: placeholder bodies until D3 has read bodies.)
+PER_TICK_INJECTIONS: tuple[int, ...] = (
+    1, 3, 7, 8, 11, 14, 15, 20, 21, 23, 25, 26, 27
+)
 
 SINK_FLOWS: tuple[int, ...] = tuple(
     f.fid for f in FLOW_LEDGER if f.target in (E1, E2)
@@ -142,6 +147,13 @@ def flow_ops() -> dict[int, tuple[str, ...]]:
 
 FLOW_OPS: dict[int, tuple[str, ...]] = flow_ops()
 
+#: The one-tick-delayed set.  Round 10: exactly {#10, #17} -- and NOT
+#: because the graph has cycles through them.  The justification is stage
+#: inversion (a stage both consumes and emits the same flow: P3 -> P1 for
+#: #10, P5 -> P4 for #17, so the read precedes the same tick's emit) plus
+#: store-read injection (every store read is injected, so no other flow's
+#: word starts with `consume`).  That is what this derivation encodes: the
+#: set is read off the op word, not off a cycle census.
 CYCLE_FLOWS: tuple[int, ...] = tuple(
     fid for fid, ops in FLOW_OPS.items() if ops and ops[0] == "consume"
 )
@@ -283,8 +295,12 @@ class SyntheticSource:
         if fid == 22:
             slot = (tick - 1) % 3
             return BiasPrimitive(f"bias-{slot}", _BIAS_STEPS[slot])
-        if fid == 23:
-            return MatOverlay(tick, f"cry-{tick}", "active")
+        if fid == 18:
+            # PROVISIONAL round 10: the loop's emergent crystal enters the
+            # nursery as a candidate record (#18); the router's mat read
+            # (#8) and the ratchet's survivor read (#23) see the stored
+            # records, not this token.
+            return MatOverlay(tick, f"cry-{tick}", "candidate")
         if fid == 24:
             head_id = board.head()[0]
             return MatOverlay(tick, head_id, "active")
@@ -373,9 +389,11 @@ class DryRun:
         def put(fid: int, body: object, provenance: Provenance) -> None:
             envelopes[fid] = Envelope(provenance, body)
 
-        # D2 head reads (#8, #25) inherit the head record's provenance.
-        # A physics-mode board may be empty between evictions; a read with
-        # no resident is an empty body with self-origin provenance.
+        # D2 head reads (#8 router, #23 ratchet-survivor, #25 stale) inherit
+        # the head record's provenance.  A physics-mode board may be empty
+        # between evictions; a read with no resident is an empty body with
+        # self-origin provenance.  PROVISIONAL round 10: #23 reads the
+        # stored records (head shape), it is no longer a write.
         residents = self.board.residents()
         if residents:
             head_id, epoch = residents[0]
@@ -386,9 +404,11 @@ class DryRun:
                     f"no stored provenance for D2 head {head_id!r}"
                 ) from None
             put(8, MatOverlay(epoch, head_id, "stale"), head_provenance)
+            put(23, MatOverlay(epoch, head_id, "stale"), head_provenance)
             put(25, MatOverlay(epoch, head_id, "stale"), head_provenance)
         else:
             put(8, None, Provenance(8, tick))
+            put(23, None, Provenance(23, tick))
             put(25, None, Provenance(25, tick))
 
         # D4 read (#7) hands back the exact stored object, provenance and
@@ -400,7 +420,9 @@ class DryRun:
             put(7, latest, self._d4_provenance[-1])
 
         # Unimplemented D1/D3 reads: empty body, self-origin provenance.
-        for fid in (11, 14, 15, 20, 26):
+        # PROVISIONAL round 10: D3 has no read bodies yet (#20 scaffolds,
+        # #21 motifs, #26 trails, #27 dissipated entropy).
+        for fid in (11, 14, 15, 20, 21, 26, 27):
             put(fid, None, Provenance(fid, tick))
 
         # Non-read flows: fixed executor dispatch.  Placeholders are never
@@ -466,7 +488,7 @@ class DryRun:
         """Absorb committed writes; notify the source one-way, post-commit.
 
         Store effects: #19 deposits a real D3 body (the fixed-cadence no-op
-        body is not deposited), #23 births / #24 revalidates a D2 record,
+        body is not deposited), #18 births / #24 revalidates a D2 record,
         and a confidence-0 #22 is a **consumed no-op** (Q4): the event is
         drained with the other write mailboxes, but no D4 state changes, so
         the identity ``B: 1 = 1 + 0 + 0`` holds on the absorbed path rather
@@ -495,9 +517,11 @@ class DryRun:
         ):
             self.debris.deposit(deposit.body, deposit.provenance, self._tick_no)
 
-        # D2 record commits (#23 birth, #24 revalidation).  The fixed-cadence
-        # no-op token leaves the store untouched.
-        overlay = envelopes.get(23)
+        # D2 record commits (#18 birth, #24 revalidation).  The fixed-cadence
+        # no-op token leaves the store untouched.  PROVISIONAL round 10:
+        # the loop (#18) births the candidate into the nursery; 6.0 (#24)
+        # revalidates the head it read at #23.
+        overlay = envelopes.get(18)
         if (
             overlay is not None
             and type(overlay.body) is MatOverlay
@@ -516,7 +540,7 @@ class DryRun:
 
         # One-way post-commit notification: the source attaches the patch
         # for the committed records (Q1-A).
-        for fid in (23, 24):
+        for fid in (18, 24):
             envelope = envelopes.get(fid)
             if (
                 envelope is not None

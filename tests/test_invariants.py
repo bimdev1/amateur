@@ -15,10 +15,11 @@ and these structural checks over what the plumbing may do in one tick:
   every prerequisite of a stage is processed by construction.
 - INV-BLANKET: the only entity-adjacent edges are the four port pairs
   around P1; every entity crossing goes through 1.0.
-- INV-GEOMETRY (user-adjudicated two-tier reading): the parametric
-  geometry {D2, D4} is written only by 6.0 (the ratchet); D1/D3 are
-  operational stores with per-tick dynamic writes by design —
-  D1 <- P4, D3 <- P5; no other flow writes any store.
+- INV-GEOMETRY (round-10 re-spec, provisional): the only ratchet-exclusive
+  store is D4; D2 is a nursery with two owners — the loop births the
+  candidate (#18, P3) and the ratchet writes the revalidated overlay
+  (#24, P6).  D1/D3 stay operational stores with per-tick dynamic writes
+  by design — D1 <- P4, D3 <- P5; no other flow writes any store.
 """
 from __future__ import annotations
 
@@ -141,21 +142,28 @@ class TestGeometry(unittest.TestCase):
         }
         self.assertEqual(
             writers,
-            {"D1": {"P4"}, "D2": {"P6"}, "D3": {"P5"}, "D4": {"P6"}},
+            {"D1": {"P4"}, "D2": {"P3", "P6"}, "D3": {"P5"}, "D4": {"P6"}},
         )
 
-    def test_inv_geometry_ratchet_exclusive_stores(self) -> None:
-        for store in ("D2", "D4"):
-            writes = [
+    def test_inv_geometry_d4_is_the_only_ratchet_exclusive_store(self) -> None:
+        """Round 10: D2's ratchet-only reading is withdrawn (the nursery
+        is born into by 3.0); D4 stays the sole ratchet-exclusive store."""
+        writes = {
+            store: [
                 (src, name)
                 for src, name, dst in edges()
                 if dst == store and "(read)" not in name
             ]
-            self.assertTrue(writes, msg=store)
-            self.assertTrue(
-                all(src == "P6" for src, _name in writes),
-                msg=f"{store} written outside the ratchet",
-            )
+            for store in ("D2", "D4")
+        }
+        self.assertEqual(
+            {(src, name) for src, name in writes["D4"]},
+            {("P6", "Sedimented Invariants")},
+        )
+        self.assertEqual(
+            {src for src, _name in writes["D2"]}, {"P3", "P6"}
+        )
+        self.assertGreater(len(writes["D2"]), 1)
 
 
 if __name__ == "__main__":

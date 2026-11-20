@@ -139,12 +139,15 @@ class _OversizedPatch:
 
 
 def _body_type(fid: int) -> type:
+    # Round 10: #18 is the D2 birth (candidate overlay); #23/#24 remain the
+    # surviving-crystal read and the ratchet write.  REAL_BODIES still lists
+    # #18's old EmergentCrystalBody body for the historical record.
+    if fid in (18, 23, 24):
+        return MatOverlay
     if fid in REAL_BODIES:
         return REAL_BODIES[fid]
     if fid == 22:
         return BiasPrimitive
-    if fid in (23, 24):
-        return MatOverlay
     raise AssertionError(f"no body type for #{fid}")
 
 
@@ -459,14 +462,14 @@ class TestPatchAccounting(unittest.TestCase):
     def test_missing_patch_on_commit_asserts(self) -> None:
         run = make_run(seed=7)
         run.tick()
-        run.board.birth(MatOverlay(9, "ghost", "active"))
-        envelope = run.dry.derived[23]
+        # Round 10: the D2 birth commit is #18 (the candidate crystal).
+        run.board.birth(MatOverlay(9, "ghost", "candidate"))
         from amateur.provenance import Envelope, Provenance
 
-        ghost = Envelope(Provenance(23, run.dry.tick_no),
-                         MatOverlay(1, "ghost", "active"))
+        ghost = Envelope(Provenance(18, run.dry.tick_no),
+                         MatOverlay(1, "ghost", "candidate"))
         with self.assertRaises(AssertionError):
-            run.source.on_commit(23, ghost, board=run.board, debris=run.dry.debris)
+            run.source.on_commit(18, ghost, board=run.board, debris=run.dry.debris)
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +509,7 @@ class TestFullPatchModeFailsClosed(unittest.TestCase):
         """The outer byte ceiling is a storage bound and still fails closed.
 
         A synthetic patch larger than ``MAX_PATCH_BYTES`` is refused by the
-        #23 derivation (before any arrival, commit, or charge); the failing
+        #18 derivation (before any arrival, commit, or charge); the failing
         tick leaves the store, D2 and the organ clean.
         """
         run = make_run(seed=7)
@@ -531,7 +534,7 @@ class TestFullPatchModeFailsClosed(unittest.TestCase):
             dict(run.dry.missed),
         )
         with self.assertRaises(AssertionError) as caught:
-            run.source._birth_token(2, run.board)
+            run.source._candidate(2, run.board)
         message = str(caught.exception)
         self.assertIn(f"{oversized.nbytes}", message)
         self.assertIn("per-patch ceiling", message)

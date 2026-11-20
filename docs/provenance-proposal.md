@@ -516,9 +516,11 @@ can or should prove `(source_fid, tick_born)` correctness. Consequences:
 - `formal/DryRun.lean` and `tools/gen_lean.py` need **no change** for
   A2/B/C/D. `geometry_write_channel_purity` is a kind-level fact
   (`d4Allowed = [bias]`, `d2Allowed = [overlay]`) and stays true; the
-  envelope adds no payload kind. `geometry_writes_anchored` pins
-  `d4WriteFids = [22]`, `d2WriteFids = [23, 24]`; unchanged.
-  `mat_*` theorems are about epoch lists; unchanged.
+  envelope adds no payload kind. `geometry_writes_anchored` (renamed
+  `geometry_writes_absorbed` in round 10) pinned `d4WriteFids = [22]`,
+  `d2WriteFids = [23, 24]`; after the round-10 spec correction it is
+  `d2WriteFids = [18, 24]`, so this round-8 statement is superseded on the
+  D2 side. `mat_*` theorems are about epoch lists; unchanged.
 - The only at-risk text markers are in
   `test_lean_lockstep.test_payload_schema_markers_match_python`
   (`def d4WriteFids : List Nat := [22]`,
