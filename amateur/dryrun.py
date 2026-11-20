@@ -1,58 +1,90 @@
-"""Dry run: pure event plumbing along the ledger spine.
+"""Dry run: pure event plumbing along the corrected 27-flow ledger spine.
 
 No physics — every stage consumes its ledger inputs and emits its ledger
-outputs. The geometry channels carry typed payloads (see payloads.py):
-D2 writes (#23, #24) carry epoch-stamped overlays, D4 writes (#22) carry
-bias primitives — INV-EMPTINESS holds by construction. Every other
-payload stays a placeholder until physics. The driving gradient (#1, #3)
-and the geometry echoes (#7, #8, #11, #14, #15, #20, #25, #26) are
-injected every tick; read-consumes expect data (a deficit charge), store
-absorbs are best-effort; the two in-tick cycles (#10 Resolved Trajectory,
-#17 Collapse Mandate) are one-tick-delayed mailboxes.
+outputs.  Round 11 (contract §2) wires the typed D2/D3 schema into the
+executor:
 
-Channel semantics (user-adjudicated): reject-with-charge at capacity-1
-mailboxes. An arrival into an empty box is accepted; an arrival onto a
-non-empty box is refused: the event object is discarded at the channel
-and a scalar excess charge is recorded (refusals are never retained as
-events, never logged as payloads, never replayable). Acceptance is
-first-arrival-wins with ledger order as tie-break: injections and stage
-emissions proceed in ascending fid within their phase, in spine order.
-Deficit (expected, absent) and excess (arrived, refused) charges are
-distinct kinds with separate counters; they are never summed. The two
-per-tick identities: attempted = accepted + refused, and accepted =
-consumed + delta-sunk + delta-depth.
+- #18 births an `EmergentCrystalBody` into the D2 candidate index; #24
+  writes a ratcheted `MatOverlay`; #22 sediments a lineage-bearing
+  `BiasPrimitive`.  `CYCLE_FLOWS` is renamed `STAGE_BACKWARD_FLOWS`: the
+  delayed set is exactly the stage-backward process edges {#10, #17},
+  justified by stage inversion, not by a cycle census.
+- #23 is the nursery survivor read (`nursery_survivor(tick)`), surfaced
+  **without** a qualified pre-filter so the #22 gate can refuse a harmful
+  survivor; #8 reads the overlay head as an active ratcheted overlay, #25
+  labels it stale for hand-off.
+- D3 is cohort-level.  #20/#21/#26 read scaffold/motif/trail cohorts;
+  #27 is the one destructive read: its drain happens at P1's consume of
+  #27 in the same tick, and declined/refused copies never drain.
+- Physics-mode lineage gates: #24's `motif_lineage` must equal this tick's
+  consumed #21 motif; #22's `candidate_lineage` must name the candidate
+  surfaced by this tick's consumed #23, and promotion happens before the
+  D4 sediment.  Violations are `AssertionError` wiring defects, never
+  charges.  Synthetic mode is plumbing-only and does not enforce these
+  lineage gates; the type pins still apply.
+- D3 byte overflow is drained in-tick first; `evict_to_ceiling` is the
+  recorded backstop.  `mass_balance()` is asserted after every tick.
 
-Cadence honesty: the uniform per-tick emission schedule and the one-#22
-/one-#23-per-tick geometry writes are plumbing, not design — the always-on
-spine's cadence only. In the physics epoch the sedimentation flows
-(#22, #23, #24) become trigger-gated (6.0 is an interference-checked
-gate, not a metronome), so theorems stated against this schedule are
-registry-marked plumbing-only in docs/TESTING.md; the mat theorems carry
-the schedule as an explicit hypothesis (`mat_*_policy`).
+Provenance (A2, adjudicated): every accepted payload is an
+`Envelope(Provenance(source_fid, tick_born), body)`.  `PAYLOAD_SCHEMA` is
+the exact-type body whitelist; write channels have no `None`, read
+channels allow `None` (the A2 rule then gives the read self-origin
+provenance).  `_derive()` runs once at the start of every tick and fills
+`self.derived`; `_arrive()` only transports.  Store reads inherit the
+stored record's provenance; writes are born at their emission tick.
 
-Verification: `flow_ops` and `step_flow` define a pure, per-flow
-independent recurrence over mailbox depths; `formal/DryRun.lean` proves
-its long-run shape (boundedness, cycle delays, sink rates, miss freezing)
-and `tests/test_lean_lockstep.py` proves the generated Lean op table
-matches this module's ledger-derived table.
+Channel semantics (adjudicated): reject-with-charge at capacity-1
+mailboxes, first-arrival-wins with ledger order as tie-break; refused
+copies are discarded at the channel and leave a scalar excess charge;
+deficit and excess charges are never summed.  The per-tick identities are
+`attempted = accepted + refused` and
+`accepted = consumed + delta-sunk + delta-depth`.
+
+Verification: `flow_ops`/`step_flow` are the pure per-flow recurrence;
+`formal/DryRun.lean` is generated from the same table (the op table must
+not change) and `tests/test_lean_lockstep.py` proves parity.
 """
 from __future__ import annotations
 
 from collections import Counter, deque
 from dataclasses import dataclass
-from typing import Mapping, NamedTuple
+from typing import Mapping, NamedTuple, Protocol
 
 from .events import FlowEvent, carrier_for
 from .ledger import E1, E2, FLOW_LEDGER, STORES
 from .payloads import (
+    COHORT_KINDS,
+    DEBRIS_TTL,
+    MAT_SEED,
+    NON_READ_FLOWS,
+    NO_CANDIDATE_ID,
+    NO_DEBRIS_ID,
+    NO_MOTIF_ID,
+    NOOP_OVERLAY_ID,
+    AvoidanceTrailsBody,
     BiasPrimitive,
-    D2_FLOWS,
-    D2_WRITES,
-    D4_FLOWS,
-    D4_WRITES,
+    CostErrorBody,
+    DebrisCeilingExceeded,
+    DebrisCohort,
+    DebrisPool,
+    DigestedDebrisBody,
+    DissipatedEntropyBody,
+    EmergentCrystalBody,
     MatBoard,
     MatOverlay,
-    require_payload,
+    ScaffoldsBody,
+    StructuralMotifBody,
+    SurvivingCrystalBody,
+    noop_debris,
+    noop_entropy,
+    noop_motif,
+    noop_overlay,
+    noop_survivor,
+)
+from .provenance import (
+    Envelope,
+    Provenance,
+    require_channel_provenance,
 )
 
 
@@ -66,15 +98,20 @@ class Stage:
 
 
 SPINE: tuple[Stage, ...] = (
-    Stage("1.0 Transduce Markov Blanket", (1, 3, 10), (2, 4, 5, 6)),
+    Stage("1.0 Transduce Markov Blanket", (1, 3, 10, 27), (2, 4, 5, 6)),
     Stage("2.0 Route Without Ossification", (6, 7, 8, 26), (9,)),
-    Stage("3.0 Execute Observation Loop", (9, 11), (10, 12, 18)),
-    Stage("4.0 Allocate & Regulate Whiteboard", (12, 14, 17), (13, 16)),
-    Stage("5.0 Digest & Collapse Ceiling-Bound Units", (15, 16, 18, 20), (17, 19, 21)),
-    Stage("6.0 Ratchet & Sediment Grammar", (21, 25), (22, 23, 24)),
+    Stage("3.0 Execute Observation Loop", (9, 11), (10, 12, 16, 18)),
+    Stage("4.0 Allocate & Regulate Whiteboard", (12, 14, 17, 20), (13,)),
+    Stage("5.0 Digest & Collapse Ceiling-Bound Units", (15, 16, 25), (17, 19)),
+    Stage("6.0 Ratchet & Sediment Grammar", (21, 23), (22, 24)),
 )
 
-PER_TICK_INJECTIONS: tuple[int, ...] = (1, 3, 7, 8, 11, 14, 15, 20, 25, 26)
+#: Driving gradient (#1, #3) plus EVERY store read, corrected graph.
+#: (#23 is a D2 read now; #21/#27 are D3 reads -- injected with empty
+#: placeholder bodies until D3 has read bodies.)
+PER_TICK_INJECTIONS: tuple[int, ...] = (
+    1, 3, 7, 8, 11, 14, 15, 20, 21, 23, 25, 26, 27
+)
 
 SINK_FLOWS: tuple[int, ...] = tuple(
     f.fid for f in FLOW_LEDGER if f.target in (E1, E2)
@@ -88,6 +125,14 @@ def _write_fids() -> tuple[int, ...]:
 
 
 WRITE_FLOWS: tuple[int, ...] = _write_fids()
+
+#: Non-read flows that stay placeholders this round (Lead decision f).
+#: #16 is **derived this round** (P3 source, no D1 dependency) and was
+#: removed from this set (contract §2.7).
+PLACEHOLDER_FLOWS: frozenset[int] = frozenset({1, 2, 4, 5, 9, 13})
+
+#: Non-read flows the payload source must supply (content-only hook, Q2).
+SOURCE_FLOWS: frozenset[int] = NON_READ_FLOWS - PLACEHOLDER_FLOWS
 
 
 def flow_ops() -> dict[int, tuple[str, ...]]:
@@ -113,9 +158,19 @@ def flow_ops() -> dict[int, tuple[str, ...]]:
 
 FLOW_OPS: dict[int, tuple[str, ...]] = flow_ops()
 
-CYCLE_FLOWS: tuple[int, ...] = tuple(
+#: INV-STAGE-ORDER (renamed from INV-CYCLE-DELAY): the one-tick delayed
+#: set is exactly the **stage-backward process edges** {#10, #17}.  A stage
+#: both consumes and emits these flows (P3 -> P1 for #10, P5 -> P4 for #17),
+#: so the same-tick read would precede the same-tick emit.  Store reads are
+#: injected at tick start and need no delay.  The set is read off the op
+#: words, not off a cycle census.
+STAGE_BACKWARD_FLOWS: tuple[int, ...] = tuple(
     fid for fid, ops in FLOW_OPS.items() if ops and ops[0] == "consume"
 )
+
+#: Deprecated compatibility alias while the Lean lockstep consumer updates;
+#: new code must use ``STAGE_BACKWARD_FLOWS``.
+CYCLE_FLOWS: tuple[int, ...] = STAGE_BACKWARD_FLOWS
 
 
 class FlowDelta(NamedTuple):
@@ -177,32 +232,6 @@ def prefix_depth(fid: int, box: int, n: int) -> int:
 _BIAS_STEPS = (0.4, 0.6, 0.8)
 
 
-def _payload_for(fid: int, tick: int, board: MatBoard) -> object:
-    """Synthetic payload for the typed geometry channels.
-
-    D2: the stale read (#25) delivers the board head; the ratchet's
-    revalidation (#24) and surviving-crystal birth (#23) carry the current
-    epoch. D4: the base-ops read (#7) delivers the latest bias; the
-    sedimentation (#22) mints a rotating confidence primitive. Sparse
-    reads may be None when the store has not yet filled.
-    """
-    if fid in D2_WRITES:
-        stale_id, _ = board.head()
-        if fid == 24:
-            return MatOverlay(tick, stale_id, "active")
-        return MatOverlay(tick, f"cry-{tick}", "active")
-    if fid in D2_FLOWS:
-        overlay_id, epoch = board.head()
-        return MatOverlay(epoch, overlay_id, "stale")
-    if fid in D4_WRITES:
-        slot = (tick - 1) % 3
-        return BiasPrimitive(f"bias-{slot}", _BIAS_STEPS[slot])
-    if fid in D4_FLOWS:
-        latest = board.latest_bias()
-        return latest
-    return None
-
-
 @dataclass(frozen=True)
 class TickStat:
     attempted: dict[int, int]
@@ -223,17 +252,151 @@ class Report:
     missed: dict[int, int]
     sunk: dict[int, int]
     history: tuple[TickStat, ...]
+    ceiling_evictions: tuple[DebrisCohort, ...] = ()
+
+
+
+class PayloadSource(Protocol):
+    """Content-only payload source hook (Q2, adjudicated A).
+
+    The source supplies *bodies* for the non-read flows.  It cannot
+    construct envelopes, choose provenance, influence the schedule/stage
+    order/channel semantics, or write back into the executor.  Store reads
+    stay executor-derived.  A failure is an assertion in the derivation
+    pass, never a channel charge.
+
+    ``coverage`` is a plain data ledger (``fid -> derived | synthetic |
+    placeholder``) read by tests only; no behaviour branches on it.  For a
+    physics source, ``derive_body`` asserts for any fid it is asked for
+    that is not in its derived dispatch.
+    """
+
+    mode: str
+    coverage: Mapping[int, str]
+
+    def derive_body(
+        self, fid: int, tick: int, *, board: MatBoard, debris: DebrisPool
+    ) -> object: ...
+
+    def on_commit(
+        self,
+        fid: int,
+        envelope: Envelope,
+        *,
+        board: MatBoard,
+        debris: DebrisPool,
+    ) -> None: ...
+
+
+def _synthetic_cohorts(tick: int) -> tuple[DebrisCohort, ...]:
+    """One valid cohort of each kind, for the synthetic plumbing source."""
+    provenance = Provenance(19, tick)
+    return tuple(
+        DebrisCohort(
+            cohort_id=f"{kind}-{tick}",
+            kind=kind,
+            centroid=(0.0,) * 64,
+            count=1,
+            spread=0.0,
+            first_tick=tick,
+            last_tick=tick,
+            peak_surprise=0.0,
+            provenance=provenance,
+        )
+        for kind in COHORT_KINDS
+    )
+
+
+class SyntheticSource:
+    """The explicit plumbing sentinel: synthetic bodies, no physics.
+
+    Reachable only by explicit construction; ``DryRun()`` defaults to it so
+    the plumbing tests keep working.  Every non-read flow is covered as
+    ``synthetic`` in the coverage ledger.  Synthetic mode is plumbing-only:
+    the type pins apply, but the physics-mode lineage gates are **not**
+    enforced (no real #21 motif / #23 evidence exists to cite).
+    """
+
+    mode = "synthetic"
+
+    def __init__(self) -> None:
+        self.coverage: dict[int, str] = {
+            fid: "synthetic" for fid in sorted(NON_READ_FLOWS)
+        }
+
+    def derive_body(
+        self, fid: int, tick: int, *, board: MatBoard, debris: DebrisPool
+    ) -> object:
+        if fid == 16:
+            # Synthetic, but a real dispatch: no fallback in the executor.
+            return CostErrorBody(cost=float(tick), error=0.0)
+        if fid == 18:
+            return EmergentCrystalBody(
+                candidate_id=f"cand-{tick}",
+                residual=(0.0,) * 64,
+                surprise=0.0,
+                born_tick=tick,
+            )
+        if fid == 19:
+            return DigestedDebrisBody(
+                debris_id=f"debris-{tick}",
+                cohorts=_synthetic_cohorts(tick),
+            )
+        if fid == 22:
+            slot = (tick - 1) % 3
+            return BiasPrimitive(f"bias-{slot}", _BIAS_STEPS[slot])
+        if fid == 24:
+            head_id = board.head()[0]
+            return MatOverlay(tick, head_id, "active")
+        return None
+
+    def shadow_evidence(self, tick: int) -> dict[str, tuple[float, float]]:
+        """Synthetic source has no shadow scores."""
+        return {}
+
+    def on_commit(
+        self,
+        fid: int,
+        envelope: Envelope,
+        *,
+        board: MatBoard,
+        debris: DebrisPool,
+    ) -> None:
+        return None
 
 
 class DryRun:
     """Mailbox-based executor of the ledger spine, plumbing only."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        source: PayloadSource | None = None,
+        *,
+        seed_board: bool = True,
+    ) -> None:
+        self.source: PayloadSource = (
+            SyntheticSource() if source is None else source
+        )
         self.mailboxes: dict[int, deque[FlowEvent]] = {
             f.fid: deque() for f in FLOW_LEDGER
         }
-        self.board = MatBoard()
-        self.emissions: list[tuple[int, int, object]] = []
+        self.board = MatBoard(seed=seed_board)
+        self.debris = DebrisPool()
+        self.derived: dict[int, Envelope] = {}
+        self.emissions: list[tuple[int, int, Envelope]] = []
+        self._head_provenance: dict[str, Provenance] = (
+            {MAT_SEED[0]: Provenance(23, 0)} if seed_board else {}
+        )
+        self._candidate_provenance: dict[str, Provenance] = {}
+        self._d4_provenance: list[Provenance] = []
+        #: This tick's consumed #23 survivor / #21 motif (lineage gates).
+        self._survivor_consumed: str | None = None
+        self._survivor_consumed_qualified: bool | None = None
+        self._motif_consumed: str | None = None
+        #: Recorded D3 ceiling-eviction backstop cohorts (contract §2.4).
+        self.ceiling_evictions: list[DebrisCohort] = []
+        #: Confidence-0 #22 writes absorbed as consumed no-ops (Q4).
+        self.zero_confidence_absorbed: Counter[int] = Counter()
         self._tick_no = 0
         self.attempted: Counter[int] = Counter()
         self.accepted: Counter[int] = Counter()
@@ -243,25 +406,195 @@ class DryRun:
         self.sunk: Counter[int] = Counter()
         self.max_depth: Counter[int] = Counter()
 
+    @property
+    def tick_no(self) -> int:
+        """The current tick index (0 before the first ``tick``)."""
+        return self._tick_no
+
     def _touch(self, fid: int) -> None:
         depth = len(self.mailboxes[fid])
         if depth > self.max_depth[fid]:
             self.max_depth[fid] = depth
 
+    def _derive(self) -> None:
+        """Derivation pass: fill every flow's envelope from live state.
+
+        Executor-derived reads (contract §2.1):
+
+        =====  =====================================================
+        fid    body
+        =====  =====================================================
+        7      latest stored `BiasPrimitive` (identity) or None
+        8      overlay head as an active ratcheted `MatOverlay` or None
+        23     `board.nursery_survivor(tick)` (no qualified pre-filter)
+               or None; provenance is the candidate's #18 provenance
+        25     overlay head labelled stale, or None
+        20/26  `ScaffoldsBody` / `AvoidanceTrailsBody` from D3 cohorts,
+               or None; provenance = newest contributing #19 write
+        21     `StructuralMotifBody` from `best_motif()`, or None
+        27     `DissipatedEntropyBody` from `drainable(tick)`, or None
+        11/15  D1 frozen placeholders (None)
+        =====  =====================================================
+
+        Non-read flows are delegated to the content-only source; a fixed
+        placeholder set is emitted as None and never asked of the source.
+        A source failure raises here, before any arrival, never a charge.
+        """
+        tick = self._tick_no
+        self._survivor_consumed = None
+        self._survivor_consumed_qualified = None
+        self._motif_consumed = None
+        envelopes: dict[int, Envelope] = {}
+
+        def put(fid: int, body: object, provenance: Provenance) -> None:
+            envelopes[fid] = Envelope(provenance, body)
+
+        def as_provenance(value: object) -> Provenance:
+            if type(value) is Provenance:
+                return value
+            return Provenance(value.source_fid, value.tick_born)  # type: ignore[attr-defined]
+
+        def newest(cohorts: tuple[DebrisCohort, ...], fid: int) -> Provenance:
+            if not cohorts:
+                return Provenance(fid, tick)
+            return max(
+                (as_provenance(cohort.provenance) for cohort in cohorts),
+                key=lambda provenance: provenance.tick_born,
+            )
+
+        # --- D2 overlay index reads (#8 active ratcheted, #25 stale) ------
+        residents = self.board.residents()
+        if residents:
+            head_id, epoch = residents[0]
+            try:
+                head_provenance = self._head_provenance[head_id]
+            except KeyError:
+                raise RuntimeError(
+                    f"no stored provenance for D2 head {head_id!r}"
+                ) from None
+            put(8, MatOverlay(epoch, head_id, "active"), head_provenance)
+            put(25, MatOverlay(epoch, head_id, "stale"), head_provenance)
+        else:
+            put(8, None, Provenance(8, tick))
+            put(25, None, Provenance(25, tick))
+
+        # --- D2 nursery survivor read (#23, no qualified pre-filter) -----
+        survivor = self.board.nursery_survivor(tick)
+        if survivor is None:
+            put(23, None, Provenance(23, tick))
+        else:
+            provenance = self._candidate_provenance.get(survivor.candidate_id)
+            if provenance is None:
+                raise RuntimeError(
+                    "survivor has no stored #18 provenance: "
+                    f"{survivor.candidate_id!r}"
+                )
+            put(23, survivor, provenance)
+
+        # --- D4 read (#7): exact stored object or None -------------------
+        latest = self.board.latest_bias()
+        if latest is None:
+            put(7, None, Provenance(7, tick))
+        else:
+            put(7, latest, self._d4_provenance[-1])
+
+        # --- D3 cohort reads (#20/#21/#26/#27) --------------------------
+        scaffolds = self.debris.read("scaffold")
+        put(
+            20,
+            ScaffoldsBody(scaffolds) if scaffolds else None,
+            newest(scaffolds, 20),
+        )
+        motif = self.debris.best_motif()
+        if motif is None:
+            put(21, None, Provenance(21, tick))
+        else:
+            put(
+                21,
+                StructuralMotifBody(
+                    motif_id=motif.cohort_id,
+                    debris_id=motif.cohort_id,
+                    centroid=motif.centroid,
+                    count=motif.count,
+                    spread=motif.spread,
+                    persistence=max(0, motif.last_tick - motif.first_tick),
+                    first_tick=motif.first_tick,
+                    last_tick=motif.last_tick,
+                ),
+                as_provenance(motif.provenance),
+            )
+        trails = self.debris.read("trail")
+        put(
+            26,
+            AvoidanceTrailsBody(trails) if trails else None,
+            newest(trails, 26),
+        )
+        drainable = self.debris.drainable(tick)
+        if drainable:
+            put(
+                27,
+                DissipatedEntropyBody(
+                    cohort_ids=tuple(c.cohort_id for c in drainable),
+                    magnitudes=tuple(float(c.spread) for c in drainable),
+                    tick=tick,
+                ),
+                newest(drainable, 27),
+            )
+        else:
+            put(27, None, Provenance(27, tick))
+
+        # --- D1 reads (frozen; #13 blocked) -----------------------------
+        for fid in (11, 14, 15):
+            put(fid, None, Provenance(fid, tick))
+
+        # --- Non-read flows: fixed executor dispatch -------------------
+        for fid in sorted(NON_READ_FLOWS):
+            # #1 is the external driving gradient and stays a fixed
+            # placeholder.  #3 is also an entity input, but it is *not* in
+            # PLACEHOLDER_FLOWS: the physics source attaches the real
+            # `FrameBody` to it (Round 10 behaviour, restored in Round 11 —
+            # a forced None here silently dropped the frame carrier and
+            # made the source's #3 dispatch dead code).  The synthetic
+            # source returns None for it, so plumbing is unchanged.
+            if fid in PLACEHOLDER_FLOWS:
+                body: object = None
+            else:
+                body = self.source.derive_body(
+                    fid, tick, board=self.board, debris=self.debris
+                )
+            if fid == 16 and body is None:
+                raise AssertionError(
+                    "the source must derive a CostErrorBody for #16 "
+                    "(no placeholder fallback)"
+                )
+            put(fid, body, Provenance(fid, tick))
+
+        self.derived = envelopes
+
+    def _prune_head_provenance(self) -> None:
+        """Drop provenance for overlays evicted from the mat."""
+        resident_ids = {oid for oid, _epoch in self.board.residents()}
+        for oid in [oid for oid in self._head_provenance
+                    if oid not in resident_ids]:
+            del self._head_provenance[oid]
+
     def _arrive(self, fid: int, *, copies: int = 1) -> None:
-        """Reject-with-charge arrival at a capacity-1 channel (adjudicated).
+        """Transport the derived envelope to a capacity-1 channel.
 
         First arrival in stage order wins; ledger order is the tie-break
-        (callers proceed in ascending fid within their phase). A refused
-        copy is discarded here -- the event object never materializes, no
-        payload is minted -- and leaves a scalar excess charge, distinct
-        from the miss (deficit) charge and never summed with it. O(1)
-        per copy, exactly like a sink.
+        (callers proceed in ascending fid within their phase). The body and
+        its provenance were built by `_derive` -- this method constructs
+        neither. A refused copy is discarded here (the same envelope object
+        never enters a second box) and leaves a scalar excess charge,
+        distinct from the miss (deficit) charge and never summed with it.
+        O(1) per copy, exactly like a sink.
         """
         if copies < 1:
             raise ValueError(
                 "starvation (k = 0) is deferred to the physics epoch"
             )
+        envelope = self.derived[fid]
+        require_channel_provenance(fid, envelope, self._tick_no)
         carrier = carrier_for(fid)
         for _ in range(copies):
             box = self.mailboxes[fid]
@@ -269,40 +602,206 @@ class DryRun:
             if box:
                 self.refused[fid] += 1
                 continue
-            payload = _payload_for(fid, self._tick_no, self.board)
-            require_payload(fid, payload)
-            box.append(carrier(payload=payload))
-            self.emissions.append((self._tick_no, fid, payload))
+            box.append(carrier(payload=envelope))
+            self.emissions.append((self._tick_no, fid, envelope))
             self.accepted[fid] += 1
             self._touch(fid)
 
     def _consume(self, fid: int, *, silent: bool = False) -> None:
+        """Consume one event; #23/#21 record lineage, #27 drains D3."""
         box = self.mailboxes[fid]
         if box:
-            box.popleft()
+            event = box.popleft()
             self.consumed[fid] += 1
             self._touch(fid)
+            envelope = event.payload
+            if type(envelope) is Envelope:
+                body = envelope.body
+                if fid == 23 and type(body) is SurvivingCrystalBody:
+                    if body.candidate_id != NO_CANDIDATE_ID:
+                        self._survivor_consumed = body.candidate_id
+                        self._survivor_consumed_qualified = body.qualified
+                elif fid == 21 and type(body) is StructuralMotifBody:
+                    if body.motif_id != NO_MOTIF_ID:
+                        self._motif_consumed = body.motif_id
+                elif fid == 27 and type(body) is DissipatedEntropyBody:
+                    if body.cohort_ids:
+                        drained = self.debris.drain(
+                            body.cohort_ids, self._tick_no
+                        )
+                        assert tuple(
+                            cohort.cohort_id for cohort in drained
+                        ) == body.cohort_ids, (
+                            "#27 destructive drain did not remove exactly "
+                            "the named cohorts"
+                        )
         elif not silent:
             self.missed[fid] += 1
 
+    def _deposit_with_ceiling(
+        self, body: DigestedDebrisBody, provenance: Provenance, tick: int
+    ) -> None:
+        """D3 deposit with drainage first and the recorded eviction backstop."""
+        try:
+            self.debris.deposit(body, provenance, tick)
+        except DebrisCeilingExceeded:
+            drainable = self.debris.drainable(tick)
+            if drainable:
+                self.debris.drain(
+                    tuple(cohort.cohort_id for cohort in drainable), tick
+                )
+            try:
+                self.debris.deposit(body, provenance, tick)
+            except DebrisCeilingExceeded:
+                evicted = self.debris.deposit(
+                    body, provenance, tick, allow_ceiling_evict=True
+                )
+                self.ceiling_evictions.extend(evicted)
+
     def _absorb_writes(self) -> None:
+        """Absorb committed writes; store mutations and lineage gates.
+
+        Contract §2.3/§2.4:
+
+        - #18 births a candidate (and notifies the source to attach its
+          substance patch); #24 revalidates a resident overlay id or births
+          a new one, and in physics mode its `motif_lineage` must be this
+          tick's consumed #21 motif;
+        - #19 deposits the tagged composite; a byte overflow is drained
+          first and only then falls back to the recorded eviction backstop;
+        - #22 confidence 0 is the Q4 consumed no-op; a positive sediment is
+          physics-gated on the #23 survivor (`candidate_lineage` must name
+          the candidate consumed this tick and still resident) and promotes
+          the candidate **before** the sediment;
+        - the D3 mass balance is asserted every tick.
+
+        Synthetic mode is plumbing-only: the type pins apply, lineage gates
+        do not (there is no real #21/#23 evidence to cite); physics-mode
+        violations are assertions, never charges.
+        """
         for fid in WRITE_FLOWS:
             self._consume(fid, silent=True)
-        payloads = {
-            fid: payload
-            for tick, fid, payload in self.emissions
+        envelopes = {
+            fid: envelope
+            for tick, fid, envelope in self.emissions
             if tick == self._tick_no
         }
-        overlay = payloads.get(23)
-        if isinstance(overlay, MatOverlay):
-            self.board.birth(overlay)
-        overlay = payloads.get(24)
-        if isinstance(overlay, MatOverlay):
-            self.board.revalidate(overlay)
+
+        # D3: deposit the tagged composite; no-op sentinels are skipped.
+        deposit = envelopes.get(19)
+        if (
+            deposit is not None
+            and type(deposit.body) is DigestedDebrisBody
+            and deposit.body.debris_id != NO_DEBRIS_ID
+            and deposit.body.cohorts
+        ):
+            self._deposit_with_ceiling(
+                deposit.body, deposit.provenance, self._tick_no
+            )
+
+        # #18: nursery birth.
+        candidate = envelopes.get(18)
+        if (
+            candidate is not None
+            and type(candidate.body) is EmergentCrystalBody
+            and candidate.body.candidate_id != NO_CANDIDATE_ID
+        ):
+            self.board.nursery_birth(candidate.body, self._tick_no)
+            self._candidate_provenance[candidate.body.candidate_id] = (
+                candidate.provenance
+            )
+            self.source.on_commit(
+                18, candidate, board=self.board, debris=self.debris
+            )
+
+        # #24: ratcheted overlay write-back; physics lineage gate.
+        overlay = envelopes.get(24)
+        if (
+            overlay is not None
+            and type(overlay.body) is MatOverlay
+            and overlay.body.overlay_id != NOOP_OVERLAY_ID
+        ):
+            if self.source.mode == "physics":
+                if (
+                    overlay.body.motif_lineage is None
+                    or overlay.body.motif_lineage != self._motif_consumed
+                ):
+                    raise AssertionError(
+                        "#24 motif_lineage must equal this tick's consumed "
+                        f"#21 motif {self._motif_consumed!r}, got "
+                        f"{overlay.body.motif_lineage!r}"
+                    )
+            if overlay.body.overlay_id in self.board.resident_ids():
+                self.board.revalidate(overlay.body)
+            else:
+                self.board.birth(overlay.body)
+            self._head_provenance[overlay.body.overlay_id] = (
+                overlay.provenance
+            )
+            self.source.on_commit(
+                24, overlay, board=self.board, debris=self.debris
+            )
+
         self.board.evict_if_needed(self._tick_no)
-        bias = payloads.get(22)
-        if isinstance(bias, BiasPrimitive):
-            self.board.sediment(bias)
+        self.board.enforce_patch_ceiling(self._tick_no)
+        self._prune_head_provenance()
+
+        # #22 sediment; physics lineage gate and promotion before sediment.
+        bias = envelopes.get(22)
+        if bias is not None and type(bias.body) is BiasPrimitive:
+            if bias.body.confidence > 0.0:
+                if self.source.mode == "physics":
+                    lineage = bias.body.candidate_lineage
+                    if lineage is None:
+                        raise AssertionError(
+                            "#22 positive sediment requires candidate_lineage "
+                            "(#23 survivor)"
+                        )
+                    if lineage != self._survivor_consumed:
+                        raise AssertionError(
+                            "#22 candidate_lineage must name the candidate "
+                            "surfaced by this tick's consumed #23 "
+                            f"({self._survivor_consumed!r}), got {lineage!r}"
+                        )
+                    if lineage not in self.board.nursery_ids():
+                        raise AssertionError(
+                            f"#22 lineage {lineage!r} is not a resident "
+                            "candidate"
+                        )
+                    if self._survivor_consumed_qualified is not True:
+                        raise AssertionError(
+                            "#22 gate must refuse an unqualified (harmful) "
+                            "survivor; no promotion"
+                        )
+                    self.board.nursery_promote(lineage, self._tick_no)
+                self.board.sediment(bias.body)
+                self._d4_provenance.append(bias.provenance)
+                assert len(self._d4_provenance) == len(self.board.d4), (
+                    "D4 provenance list out of step with board.d4"
+                )
+            else:
+                self.zero_confidence_absorbed[22] += 1
+
+        # One-way post-commit notifications for the remaining writes.
+        for fid in (19, 22):
+            envelope = envelopes.get(fid)
+            if envelope is not None:
+                self.source.on_commit(
+                    fid, envelope, board=self.board, debris=self.debris
+                )
+        self.board.assert_patch_bounds(
+            require_complete=(self.source.mode == "physics")
+        )
+        # Prune candidate provenance for ids no longer resident (capacity /
+        # promotion / organ eviction), so a stale id cannot masquerade.
+        resident_candidates = set(self.board.nursery_ids())
+        self._candidate_provenance = {
+            candidate_id: provenance
+            for candidate_id, provenance in self._candidate_provenance.items()
+            if candidate_id in resident_candidates
+        }
+        # §2.4: the conservation identity is asserted every tick.
+        self.debris.mass_balance()
 
     def _drain_sinks(self) -> None:
         for fid in SINK_FLOWS:
@@ -310,16 +809,40 @@ class DryRun:
             self.sunk[fid] += len(box)
             box.clear()
 
-    def tick(self, injections: Mapping[int, int] | None = None) -> None:
-        """One tick: injections (with adversarial multiplicity), spine,
-        write absorption, sink drain.
+    def _annotate_shadow_evidence(self) -> None:
+        """§2.5: pull this tick's shadow scores (one-way, read-only).
 
+        The source exposes ``shadow_evidence(tick)`` as
+        ``candidate_id -> (adapted, base)``; the executor writes it into the
+        candidate index via ``nursery_observe``.  No board is passed back to
+        the source.  An unknown candidate id is a loud store failure (organ/
+        executor divergence), never a silent skip.
+        """
+        hook = getattr(self.source, "shadow_evidence", None)
+        if not callable(hook):
+            return
+        evidence = hook(self._tick_no)
+        if not evidence:
+            return
+        for candidate_id, (adapted, base) in evidence.items():
+            self.board.nursery_observe(
+                candidate_id, adapted, base, self._tick_no
+            )
+
+    def tick(self, injections: Mapping[int, int] | None = None) -> None:
+        """One tick: derivation pass, injections (with adversarial
+        multiplicity), spine, write absorption, sink drain.
+
+        `_derive()` runs first, after the clock advances and before any
+        arrival: every flow's envelope is built from live state once.
         `injections[fid] = k` overrides that flow's canonical single
         arrival with k arrival attempts (k >= 1; starvation k = 0 is
         deferred to the physics epoch). All arrivals proceed in ledger
         fid order; later arrivals onto a full box are refused.
         """
         self._tick_no += 1
+        self._annotate_shadow_evidence()
+        self._derive()
         boosts = dict(injections or {})
         unknown = sorted(set(boosts) - set(self.mailboxes))
         if unknown:
@@ -370,13 +893,14 @@ class DryRun:
             missed=dict(self.missed),
             sunk=dict(self.sunk),
             history=tuple(history),
+            ceiling_evictions=tuple(self.ceiling_evictions),
         )
 
     def in_transit(self) -> dict[int, int]:
         """Leftovers: events emitted but not yet consumed.
 
-        Only the one-tick-delayed cycles (#10, #17) should be non-empty
-        immediately after a whole number of ticks.
+        Only the stage-backward delayed flows (#10, #17) should be
+        non-empty immediately after a whole number of ticks.
         """
         return {fid: len(box) for fid, box in self.mailboxes.items() if box}
 

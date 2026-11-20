@@ -1,6 +1,6 @@
 """Lean/Python lockstep: the checked-in Lean model must be the Python one.
 
-Two directions:
+Three directions:
 1. Table parity — the `opsOf` arms parsed out of formal/DryRun.lean are
    exactly amateur.dryrun.flow_ops() (apart from the deliberate
    absorb -> consume compilation), and the Lean profile markers name the
@@ -9,6 +9,10 @@ Two directions:
    table alone (no amateur.dryrun machinery) reproduces the master
    invariants empirically for 64 ticks; the theorems in DryRun.lean prove
    the same shape for all ticks.
+3. Generation lockstep — formal/DryRun.lean is byte-identical to
+   `python3 tools/gen_lean.py`, carries the round-11 payload pins
+   (`candidateWriteFids` / `overlayWriteFids`) and the candidate-index
+   lifecycle block, and contains no `sorry` / `axiom`.
 
 When a lean binary is available (env LEAN_BIN), the theorem file itself is
 compiled and must succeed with no `sorry`.
@@ -18,18 +22,40 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import unittest
 from collections import Counter
 from pathlib import Path
 
-from amateur.dryrun import CYCLE_FLOWS, FLOW_OPS, SINK_FLOWS
+import amateur.dryrun as dryrun
+from amateur.dryrun import FLOW_OPS, SINK_FLOWS
 from amateur.ledger import FLOW_LEDGER
 
 REPO = Path(__file__).resolve().parents[1]
 FORMAL = REPO / "formal" / "DryRun.lean"
+GEN_LEAN = REPO / "tools" / "gen_lean.py"
 LEAN_BIN = os.environ.get("LEAN_BIN", "/tmp/lean4/lean-4.21.0-linux/bin/lean")
 
 _LEAN_TO_WORD = {"Op.emit": "emit", "Op.consume": "consume", "Op.sink": "sink"}
+
+
+def _cycle_flows() -> tuple[int, ...]:
+    """Resolve the stage-backward window across the round-11 rename.
+
+    Wave 2 renames `dryrun.CYCLE_FLOWS` to `STAGE_BACKWARD_FLOWS`
+    (INV-CYCLE-DELAY -> INV-STAGE-ORDER). Accept either name so this file
+    does not pin the old spelling; the flows themselves are unchanged.
+    """
+    for name in ("STAGE_BACKWARD_FLOWS", "CYCLE_FLOWS"):
+        flows = getattr(dryrun, name, None)
+        if flows is not None:
+            return tuple(flows)
+    raise RuntimeError(
+        "amateur.dryrun has neither STAGE_BACKWARD_FLOWS nor CYCLE_FLOWS"
+    )
+
+
+CYCLE_FLOWS = _cycle_flows()
 
 
 def parse_ops_of(text: str) -> dict[int, tuple[str, ...]]:
@@ -172,6 +198,79 @@ class TestTableParity(unittest.TestCase):
             )
 
 
+class TestGeneratedLockstep(unittest.TestCase):
+    """The checked-in Lean file is generated, and generates the round-11
+    additions: per-flow D2 write pins and the candidate-index lifecycle.
+
+    The op table and the overlay-index policy are frozen: this class only
+    checks presence and provenance, never restates a theorem.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = FORMAL.read_text()
+
+    def test_checked_in_file_is_generator_output(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, str(GEN_LEAN)],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO),
+            timeout=600,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            self.text,
+            msg="formal/DryRun.lean is stale: rerun python3 tools/gen_lean.py",
+        )
+
+    def test_candidate_index_lifecycle_block_present(self) -> None:
+        for name in (
+            "nurseryTick",
+            "nurseryRun",
+            "promote",
+            "nurseryContinue",
+        ):
+            self.assertRegex(self.text, rf"\bdef {name}\b", msg=f"def {name}")
+        for name in (
+            "nurseryTick_length",
+            "nursery_bounded",
+            "nursery_birth_member",
+            "nursery_fresh",
+            "nursery_runs_distinct",
+            "nursery_promote_resident",
+            "nursery_promote_once",
+            "nursery_promote_twice",
+            "candidate_recorded_from_birth",
+            "d2_write_split",
+        ):
+            self.assertRegex(
+                self.text, rf"\btheorem {name}\b", msg=f"theorem {name}"
+            )
+        # the lifecycle recurrence must be the append/drop-one law over the
+        # candidate index, not a restatement of the overlay policy
+        self.assertIn("def nurseryTick (l : List Nat) (t : Nat) : List Nat", self.text)
+        self.assertRegex(self.text, r"\(l \+\+ \[t\]\)\.drop 1")
+
+    def test_per_flow_write_pins_present(self) -> None:
+        for marker in (
+            "def candidateWriteFids : List Nat := [18]",
+            "def overlayWriteFids : List Nat := [24]",
+            "def d2WriteFids : List Nat := [18, 24]",
+            "def d4WriteFids : List Nat := [22]",
+            "def candidateAllowed : List PayloadKind := [PayloadKind.crystal]",
+            "def overlayAllowed : List PayloadKind := [PayloadKind.overlay]",
+            "def d2Allowed : List PayloadKind := "
+            "[PayloadKind.overlay, PayloadKind.crystal]",
+        ):
+            self.assertIn(marker, self.text)
+
+    def test_no_sorry_and_no_axiom(self) -> None:
+        self.assertNotIn("sorry", self.text)
+        self.assertNotIn("axiom", self.text)
+
+
 @unittest.skipIf(not os.path.exists(LEAN_BIN), "lean binary not installed")
 class TestLeanCompiles(unittest.TestCase):
     def test_dryrun_lean_compiles_with_no_sorry(self) -> None:
@@ -214,7 +313,7 @@ class TestLeanCompiles(unittest.TestCase):
             "attempts_at_master",
             "balance_at_master",
             "geometry_write_channel_purity",
-            "geometry_writes_anchored",
+            "geometry_writes_absorbed",
             "matTick_length",
             "mat_operational_policy",
             "mat_fresh_policy",
@@ -262,7 +361,7 @@ class TestLeanCompiles(unittest.TestCase):
             "def d4WriteFids : List Nat := [22]", text
         )
         self.assertIn(
-            "def d2WriteFids : List Nat := [23, 24]", text
+            "def d2WriteFids : List Nat := [18, 24]", text
         )
         self.assertIn("rev.length > 4", text)
 

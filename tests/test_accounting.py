@@ -5,7 +5,7 @@
   + delta-depth. Nothing is created off-ledger or lost between
   mailboxes; refused copies never enter identity B, misses are deficit
   charges on the expectation side and remove nothing.
-- Liveness: every one of the 26 flows fires exactly once per tick, and
+- Liveness: every one of the 27 flows fires exactly once per tick, and
   the canonical schedule refuses nothing.
 - Stationarity: from tick 2 on, the per-tick tick stats are identical;
   tick 1 differs from tick 2 only in the two cycle warm-up misses.

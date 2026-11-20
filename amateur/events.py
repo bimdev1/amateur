@@ -1,4 +1,4 @@
-"""Typed carriers for the 26 ledger flows.
+"""Typed carriers for the 27 ledger flows.
 
 Payloads stay opaque: v0.10 declares the wiring, not the physics. Every
 carrier pins exactly one flow id, so a test can prove that the event
@@ -60,6 +60,7 @@ SurvivingCrystals = _carrier("SurvivingCrystals", 23)
 RatchetedOverlays = _carrier("RatchetedOverlays", 24)
 StaleOverlays = _carrier("StaleOverlays", 25)
 AvoidanceTrails = _carrier("AvoidanceTrails", 26)
+DissipatedEntropy = _carrier("DissipatedEntropy", 27)
 
 
 def carrier_for(fid: int) -> type[FlowEvent]:

@@ -17,12 +17,15 @@ from .events import (
     BoardOps,
     ConsumedScaffolds,
     DigestedDebris,
+    DissipatedEntropy,
+    EmergentCrystals,
     EvictedClusters,
     MatOverlays,
     RatchetedOverlays,
     SedimentedInvariants,
     SlotState,
     StateDeltas,
+    StructuralMotifs,
     StaleOverlays,
     SurvivingCrystals,
 )
@@ -37,7 +40,12 @@ class ElasticBoard(ABC):
 
     @abstractmethod
     def apply(self, deltas: StateDeltas) -> None:
-        """Flow #12: write observation-loop state deltas."""
+        """P4 input only: #12 is the regulator's evidence, not a D1 write.
+
+        D1's only write edge is #13 (`operate`); a concrete store must not
+        treat this hook as a second mutation path (Lead adjudication §9.10,
+        2026-11-20).
+        """
 
     @abstractmethod
     def operate(self, ops: BoardOps) -> None:
@@ -53,23 +61,31 @@ class ElasticBoard(ABC):
 
 
 class MultiLayerMat(ABC):
-    """D2 — density field over possible transitions; biases routing."""
+    """D2 — the nursery: candidate density field, biases routing."""
 
     @abstractmethod
     def mat_overlays(self) -> MatOverlays:
         """Flow #8: 'Density modifies the next transition'."""
 
     @abstractmethod
-    def lay_crystals(self, crystals: SurvivingCrystals) -> None:
-        """Flow #23: ratchet-approved crystals become new layers."""
+    def birth_crystals(self, crystals: EmergentCrystals) -> None:
+        """Flow #18: the loop's emergent crystal enters the nursery as a
+        candidate (adjudicated round 11: `EmergentCrystalBody` is the
+        candidate kind, in its own D2 index; it is not a `MatOverlay`
+        status and it may carry a shadow-scored patch but never a live
+        one)."""
 
     @abstractmethod
     def lay_overlays(self, overlays: RatchetedOverlays) -> None:
         """Flow #24: ratcheted overlays harden into the mat."""
 
     @abstractmethod
+    def surviving_crystals(self) -> SurvivingCrystals:
+        """Flow #23: hand survivors to the ratchet for sediment/write-back."""
+
+    @abstractmethod
     def stale_overlays(self) -> StaleOverlays:
-        """Flow #25: hand stale overlays to the ratchet for review."""
+        """Flow #25: hand stale overlays to digestion for review."""
 
 
 class BaseCore(ABC):
@@ -98,6 +114,14 @@ class DebrisPool(ABC):
         """Flow #20: recyclable scaffolds back to the digester."""
 
     @abstractmethod
+    def structural_motifs(self) -> StructuralMotifs:
+        """Flow #21: the ratchet mines motifs from the pool (round 10)."""
+
+    @abstractmethod
     def avoidance_trails(self) -> AvoidanceTrails:
         """Flow #26: 'prior deformation alters subsequent deformation' —
         trails enter routing as bias, not as instruction."""
+
+    @abstractmethod
+    def dissipated_entropy(self) -> DissipatedEntropy:
+        """Flow #27: degraded throughput drains back to the boundary."""

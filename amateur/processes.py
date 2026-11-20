@@ -27,6 +27,7 @@ from .events import (
     PredictionError,
     ResolvedTrajectory,
     RoutedDynamics,
+    DissipatedEntropy,
     SlotState,
     StaleOverlays,
     StateDeltas,
@@ -37,14 +38,20 @@ from .events import (
 class MarkovBlanketTransducer(ABC):
     """P1 — 1.0 Transduce Markov Blanket.
 
-    Inputs: #1 Gradients (E2), #3 Perturbations (E1).
+    Inputs: #1 Gradients (E2), #3 Perturbations (E1), #10 Resolved
+    Trajectory, #27 Dissipated Entropy (read, D3).
     Outputs: #2, #4, #5, #6. The boundary crossing point; nothing reaches
-    the interior except through here.
+    the interior except through here.  Round 10: #27 is D3's exit -- the
+    boundary re-channels dissipated throughput instead of never seeing it.
     """
 
     @abstractmethod
     def transduce(
-        self, gradients: Sequence[Gradients], perturbations: Sequence[Perturbations]
+        self,
+        gradients: Sequence[Gradients],
+        perturbations: Sequence[Perturbations],
+        resolved: Sequence[ResolvedTrajectory],
+        dissipated: Sequence[DissipatedEntropy],
     ) -> tuple[
         CrystallizedOutput,
         Sequence[ActiveProbes],
@@ -78,39 +85,45 @@ class Observer(ABC):
     """P3 — 3.0 Execute Observation Loop (Core Engine).
 
     Inputs: #9 Routed Dynamics, #11 Active Context.
-    Outputs: #10 Resolved Trajectory, #12 State Deltas, #18 Emergent
-    Crystals.
+    Outputs: #10 Resolved Trajectory, #12 State Deltas, #16 Cost vs. Error
+    Metrics, #18 Emergent Crystals.
     """
 
     @abstractmethod
     def observe(
         self, dynamics: RoutedDynamics, context: ActiveContext
-    ) -> tuple[ResolvedTrajectory, StateDeltas, EmergentCrystals]:
-        """Flows #10, #12, #18."""
+    ) -> tuple[
+        ResolvedTrajectory, StateDeltas, CostErrorMetrics, EmergentCrystals
+    ]:
+        """Flows #10, #12, #16, #18."""
 
 
 class WhiteboardRegulator(ABC):
     """P4 — 4.0 Allocate & Regulate Whiteboard.
 
-    Inputs: #12 State Deltas, #14 Slot State (read), #17 Collapse Mandate.
-    Outputs: #13 write/erase/resize/evict, #16 Cost vs. Error Metrics.
+    Inputs: #12 State Deltas, #14 Slot State (read), #17 Collapse Mandate,
+    #20 Consumed Scaffolds (read).
+    Output: #13 write/erase/resize/evict.
     """
 
     @abstractmethod
     def regulate(
-        self, deltas: StateDeltas, slots: SlotState, mandate: CollapseMandate
-    ) -> tuple[BoardOps, CostErrorMetrics]:
-        """Flows #13, #16."""
+        self,
+        deltas: StateDeltas,
+        slots: SlotState,
+        mandate: CollapseMandate,
+        scaffolds: ConsumedScaffolds,
+    ) -> BoardOps:
+        """Flow #13."""
 
 
 class Digester(ABC):
     """P5 — 5.0 Digest & Collapse Ceiling-Bound Units.
 
-    Inputs: #15 Evicted Clusters, #16 Cost vs. Error Metrics, #18 Emergent
-    Crystals, #20 Consumed Scaffolds.
-    Outputs: #17 Collapse Mandate, #19 Digested Debris, #21 Structural
-    Motifs. 'A contracted region suppresses difference until sufficient
-    discrepancy restores variation.'
+    Inputs: #15 Evicted Clusters, #16 Cost vs. Error Metrics, #25 Stale
+    Overlays (read).
+    Outputs: #17 Collapse Mandate, #19 Digested Debris. 'A contracted region
+    suppresses difference until sufficient discrepancy restores variation.'
     """
 
     @abstractmethod
@@ -118,22 +131,23 @@ class Digester(ABC):
         self,
         clusters: EvictedClusters,
         metrics: CostErrorMetrics,
-        crystals: EmergentCrystals,
-        scaffolds: ConsumedScaffolds,
-    ) -> tuple[CollapseMandate, DigestedDebris, StructuralMotifs]:
-        """Flows #17, #19, #21."""
+        stale: StaleOverlays,
+    ) -> tuple[CollapseMandate, DigestedDebris]:
+        """Flows #17, #19."""
 
 
 class Ratchet(ABC):
     """P6 — 6.0 Ratchet & Sediment Grammar.
 
-    Inputs: #21 Structural Motifs, #25 Stale Overlays (read).
-    Outputs: #22 Sedimented Invariants, #23 Surviving Crystals, #24
-    Ratcheted Overlays. 'A settled region resists displacement.'
+    Inputs: #21 Structural Motifs (read, D3), #23 Surviving Crystals (read,
+    D2).
+    Outputs: #22 Sedimented Invariants, #24 Ratcheted Overlays. 'A settled
+    region resists displacement.'  Round 10: the ratchet mines D3 and reads
+    D2; it no longer receives 5.0's output.
     """
 
     @abstractmethod
     def ratchet(
-        self, motifs: StructuralMotifs, stale: StaleOverlays
-    ) -> tuple[SedimentedInvariants, SurvivingCrystals, RatchetedOverlays]:
-        """Flows #22, #23, #24: only survivors harden."""
+        self, motifs: StructuralMotifs, survivors: SurvivingCrystals
+    ) -> tuple[SedimentedInvariants, RatchetedOverlays]:
+        """Flows #22, #24: only survivors harden."""

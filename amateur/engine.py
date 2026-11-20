@@ -50,7 +50,7 @@ class Loop:
     base_core: BaseCore
 
     def blueprint(self) -> tuple[Flow, ...]:
-        """The 26-flow wiring this loop is contractually bound to."""
+        """The 27-flow wiring this loop is contractually bound to."""
         return FLOW_LEDGER
 
     def step(self) -> None:

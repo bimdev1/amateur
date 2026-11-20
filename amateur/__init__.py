@@ -1,7 +1,7 @@
 """amateur — not agi.
 
 v0.10 scaffold of the loop architecture declared in `v0.10-untested.md`:
-entities E1/E2, processes P1-P6, stores D1-D4, and the 26-flow ledger that
+entities E1/E2, processes P1-P6, stores D1-D4, and the 27-flow ledger that
 binds the diagram, the prose, and the code together.
 """
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 - Every abstract method on every component must cite the ledger flow ids
   it owns (`#<n>` in its docstring), and the union of citations must cover
-  exactly flows #1-#26. Doc drift becomes a test failure.
+  exactly flows #1-#27. Doc drift becomes a test failure.
 - Error paths: unknown flow ids rejected; abstract components refuse
   direct instantiation.
 """
@@ -49,7 +49,7 @@ class TestDocCitations(unittest.TestCase):
 
 class TestErrorPaths(unittest.TestCase):
     def test_unknown_flow_id_is_rejected(self) -> None:
-        for bad in (0, 27, -1):
+        for bad in (0, 28, -1):
             with self.assertRaises(ValueError):
                 events.carrier_for(bad)
 

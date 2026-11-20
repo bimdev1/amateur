@@ -34,18 +34,42 @@ class TestThermodynamics(unittest.TestCase):
         self.assertEqual(self._flows_from("E1"), ["Perturbations"])
         self.assertEqual(self._flows_from("E2"), ["Gradients"])
 
-    def test_exhaust_is_the_only_degenerate_outflow(self) -> None:
+    def test_entropy_leaves_through_the_boundary(self) -> None:
+        """Round 11 (adjudicated): two entropy-typed flows exist — the
+        boundary exhaust #5 (P1 -> E1) and the labeled D3 read #27, the
+        dissipation exit.  The old "only degenerate outflow" reading is
+        void; #27's destructive drain is the operational reading."""
         entropy_flows = [f for _, f, _ in self.edges if "Entropy" in f]
-        self.assertEqual(entropy_flows, ["Entropy Exhaust"])
+        self.assertEqual(
+            entropy_flows, ["Entropy Exhaust", "Dissipated Entropy (read)"]
+        )
         exhaust = next(f for f in ledger.FLOW_LEDGER if f.flow == "Entropy Exhaust")
         self.assertEqual((exhaust.source, exhaust.target), (ledger.P1, ledger.E1))
 
-    def test_no_residue_edge_back_into_transduction(self) -> None:
-        for src, _flow, dst in self.edges:
-            self.assertFalse(
-                src == "D3" and dst == "P1",
-                msg="degraded throughput must not circulate",
-            )
+    def test_residue_edge_is_the_dissipation_exit(self) -> None:
+        """Round 11: the corrected graph HAS D3 -> P1.  #27 is a store
+        read and the only residue edge back into the transducer; its
+        consumed body is drained destructively (no D3 write restores it),
+        and the transducer leaves through the boundary exhaust #5, so
+        residue drains rather than circulates."""
+        residue = [flow for src, flow, dst in self.edges if (src, dst) == ("D3", "P1")]
+        self.assertEqual(len(residue), 1, msg="exactly one D3 -> P1 edge")
+        self.assertTrue(residue[0].endswith("(read)"))
+        self.assertIn("Entropy Exhaust", self._flows_from("P1"))
+
+    def test_dissipation_exit_replaces_the_void_no_edge_reading(self) -> None:
+        """Round 11: the old "no D3 -> P1 edge" test is replaced by this
+        positive reading; #27 is the one D3 -> P1 read and its body is the
+        dissipative entropy body."""
+        from amateur.payloads import DissipatedEntropyBody, PAYLOAD_SCHEMA
+
+        edge = [
+            (src, flow, dst) for src, flow, dst in self.edges
+            if (src, dst) == ("D3", "P1")
+        ]
+        self.assertEqual(len(edge), 1)
+        self.assertTrue(edge[0][1].endswith("(read)"))
+        self.assertIn(DissipatedEntropyBody, PAYLOAD_SCHEMA[27])
 
     def test_store_outbound_edges_are_reads(self) -> None:
         for src, flow, _dst in self.edges:
