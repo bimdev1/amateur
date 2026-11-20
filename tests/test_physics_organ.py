@@ -736,8 +736,10 @@ class TestAcceptanceScenario(unittest.TestCase):
 
     def test_recovery_toward_baseline(self) -> None:
         summary = self.trace.summary()
-        # Measured: adapted 0.1723 vs base 0.2517 on the held-out streams
-        # over the same ticks (0.685x); it is *toward*, not at, the baseline.
+        # Measured on the bank probe: adapted 0.2070 vs base 0.2517 on the
+        # held-out streams over the same ticks (0.8226x); it is *toward*,
+        # not at, the baseline.  (0.8306x is the separate fit-quality probe
+        # in TestOverlayFitHeldOut, not this summary.)
         self.assertLess(summary["adapted_over_base"], 0.85)
         self.assertGreater(summary["adapted_over_base"], 0.0)
         self.assertLess(summary["adapted_post_mean"], summary["base_post_adoption_mean"])

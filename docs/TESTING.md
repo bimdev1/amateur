@@ -259,9 +259,9 @@ How each user-supplied master invariant is currently verified:
 | INV-SOURCE (round 8) | structural + tested (no silent fallback) | content-only `PayloadSource` (Q2-A); fixed `PLACEHOLDER_FLOWS` dispatch that never reads the ledger; `PhysicsSource.derive_body` raises before any arrival; a source failure leaves every charge counter at 0; `test_physics_run.TestSourceSelection`/`TestCoverageLedger`/`TestSourceFailureIsNotACharge` | enduring (contract); physics producer partial |
 | INV-ATOMIC (round 8; round 9a) | tested (fail-closed) | record+patch atomicity on every path: capacity, byte ceiling, organ-driven evict; round 9a refuses `patch="full"` at the capacity gate **before any fit/overlay**, and the outer byte-ceiling path is exercised with a synthetic oversized patch (asserted in the derivation pass before any arrival, no state change); `MatBoard` guard rails (validate-before-pop revalidation, duplicate-birth rejection, exactly-one `evict_record`); `test_payloads.TestMatBoardGuardRails`/`TestMatBoardPatches`, `test_physics_run.TestFullPatchModeFailsClosed` | enduring (Python); Lean bounds records only |
 | INV-CAPACITY (round 9a) | derivation + tests (arithmetic; not proved in Lean) | `K ≤ γ·N·D` with γ=5.0, N = real evidence transitions used, D=64 (`amateur/physics/capacity.py`); last-layer low-rank patch `K(r)=192r+64`, `r_max=min(floor((γND−D)/192),64)`, `nbytes=4K`; N=4 → rank 6 / K=1,216 / 4,864 B; N=16 → rank 26 / K=5,056 / 20,224 B; N≥64 → rank 64 / K=12,352 / 49,408 B; dense 34,240 and full 210,920 refused at every N; outer byte ceilings are storage bounds only; `test_physics_capacity` (11) | physics epoch; γ=5.0 is pre-registered design slack, not measured; not proved in Lean |
-| INV-VALIDATION (round 9a) | tested (state-based; no-peek asserted) | pre-adoption proposal at frame 16; paired candidate-vs-base validation on held-out ticks 17–18 of the same stream; birth only if `candidate_mean < base_mean` strictly, decision at 18; rejection record reason `interference` with both means; no birth/activation on reject; `test_physics_organ.TestPreAdoptionValidation`, `test_physics_run.TestPreAdoptionValidation` | physics epoch; `validation_window=2` == `stale_patience` (documented); one candidate at a time; trigger-gating (9b) not in scope |
+| INV-VALIDATION (round 9a) | tested (state-based; no-peek asserted) | pre-adoption proposal at frame 16; paired candidate-vs-base validation on held-out ticks 17–18 of the same stream; birth only if `candidate_mean < base_mean` strictly, decision at 18; rejection record reason `interference` with both means; no birth/activation on reject; `test_physics_organ.TestPreAdoptionValidation`, `test_physics_run.TestPreAdoptionValidation` | physics epoch; `validation_window=2` == `stale_patience` (documented); one candidate at a time; trigger-gating (9b) not in scope; **scope: executor proposal path only** — the organ's legacy ratchet birth path (`_decide_tick → _adopt_or_revalidate → _fit_overlay → birth`) remains unvalidated, and the 0.8226 bank ratio is a fit-quality diagnostic, not validation evidence (design §15.3, notes 40–41) |
 | INV-RESET (round 8; round 9a) | tested | `PhysicsOrgan.reset_p6_state()` clears decisions/pending/cooldown/gate evidence/overlay table/fit history; `PhysicsRun.reset()` calls it; two consecutive `acceptance()` runs are identical (round 9a: proposal 16, birth 18, stale 31, evict 35, all-active 1.0461437156029878, flip-only 0.9665724706513396, 11 D4 sediments, clean end state); `test_physics_run.TestResetRepeatability` | enduring (harness contract); needed for the registered trace to be repeatable |
-| INV-ZERO-CONF (round 8; round 9a) | tested by serialized-bytes equality + identity B | #22 is the **derived** gate output (Q4-A): it passes only when an overlay is active and cumulative adapted < base evidence exists, confidence `clamp(1-adapted/base,0,1)`; production publishes evidence after `stale_patience` (2) applied ticks, disclosed. Round 9a's capacity-bounded patch is genuinely beneficial while active, so the gate passes on **real** evidence: 11 real sediments (frames 21–31), 25 confidence-0 no-ops, `11+25=36`; the retained prefix is byte-identical and object-identical (no test double), and the gate blocks again after eviction. `test_physics_run.TestZeroConfidenceGate` (9 tests) | physics epoch; the passing branch is now real, not injected |
+| INV-ZERO-CONF (round 8; round 9a) | tested by serialized-bytes equality + identity B | #22 is the **derived** gate output (Q4-A): it passes only when an overlay is active and cumulative adapted < base evidence exists, confidence `clamp(1-adapted/base,0,1)`; production publishes evidence after `stale_patience` (2) applied ticks, disclosed. Round 9a's capacity-bounded patch is genuinely beneficial while active, so the gate passes on **real** evidence: 11 real sediments (frames 21–31), 25 confidence-0 no-ops, `11+25=36`; the retained prefix is byte-identical and object-identical (no test double), and the gate blocks again after eviction. `test_physics_run.TestZeroConfidenceGate` (8 tests) | physics epoch; the passing branch is now real, not injected |
 | INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` | enduring |
 | INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` | plumbing-only in current form (inherits LIVENESS's cadence); enduring form follows the spine-scoped liveness |
 | INV-CENSUS | resolved (raw membership, adjudicated) | `test_recurrence` census: \|Cycles(D1)\|=7 (entangled hub), \|Cycles(D2)\|=4, \|Cycles(D3)\|=4, \|Cycles(D4)\|=3 with zero 2-/3-hop loops — D4's structural insulation | enduring (pure topology) |
@@ -432,8 +432,13 @@ the implemented behavior.
 
 ## Round 8 physics-mode acceptance record (measured)
 
-Protocol: one executor stream (`PhysicsRun`, seed 7), 8 normal ticks,
-gravity flip, 20 post-flip ticks, flip back, 8 recovery ticks. The organ
+*(round 8 record; superseded for the live policy by the Round 9a record
+   below — kept as the measured history of the dense-patch attempt.)*
+
+Protocol: one executor stream (`PhysicsRun`, seed 7), 8 warmup ticks
+(normal rows 1–7 are the measured normal phase; the gravity flip is
+applied before tick 8), gravity flip, 20 post-flip ticks, flip back, 8
+recovery ticks. The organ
 observes, digests and ratchets **before** `_derive`; the overlay is fitted
 once from the organ's same-stream buffer when a spike passes the q99 gate
 (last 16 transitions, one attempt, no post-hoc selection).
@@ -471,8 +476,10 @@ trigger-gating; full list in
 
 ## Round 9a physics-mode acceptance record (measured)
 
-Protocol: one executor stream (`PhysicsRun`, seed 7), 8 normal ticks,
-gravity flip, 20 post-flip ticks, flip back, 8 recovery ticks. The
+Protocol: one executor stream (`PhysicsRun`, seed 7), 8 warmup ticks
+(normal rows 1–7 are the measured normal phase; the gravity flip is
+applied before tick 8), gravity flip, 20 post-flip ticks, flip back, 8
+recovery ticks. The
 capacity-bounded candidate is fitted at frame 16 (16 real same-stream
 transitions), validated on frames 17–18, and born at the decision tick 18
 only if the paired held-out candidate mean is strictly below the base mean.
@@ -510,6 +517,14 @@ done (13 of the first 31 seeds reject, 18 birth; the rejection test uses
 seed 0, the first natural seed, not a re-registered acceptance). Full
 derivation, per-tick trace and honesty notes in
 [phase4-5-design.md](phase4-5-design.md) §15.
+
+*Correction provenance (round-9a audit): this file is Lead-owned.  It was
+edited by the implementer in commit `e6d6051` contrary to the task contract
+that said "Do NOT edit `docs/TESTING.md` (Lead owns)"; the Lead reviewed that
+change and adopts it.  The audit corrections on this page — the
+`TestZeroConfidenceGate` 8-test count, the INV-VALIDATION scope caveat and
+the "round 8 record" label — were applied by the implementer under explicit
+Lead delegation (shared-board task 8, docs-only).*
 
 ## What each layer catches that the others cannot
 

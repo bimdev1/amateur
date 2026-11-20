@@ -689,6 +689,14 @@ written but not consumed this round.
 
 ### 14.5 Q4 #22 gate and D4
 
+> **Superseded for the live policy by §15.4–§15.5.**  This is the round-8
+> record: the dense head+norm patch, the gate blocked on every tick, D4
+> empty, and the 121 B pre-seeded retention probe.  Round 9a's
+> capacity-bounded, validation-passed patch makes the real gate pass (11
+> sediments, §15.4) and D4 retained-contents is the live invariant; the
+> current registered trace is §15.4 and the measured rejection trace is
+> §15.5.
+
 `PhysicsSource._gate` calls `organ.ratchet_gate_passed()`; the gate is real
 and evidence-based, not a constant.  The organ records one adapted-vs-base
 surprise measurement per finalized tick **in which the active overlay was
@@ -737,8 +745,14 @@ tick), so no second sediment occurs and no event is skipped.
 
 The registered acceptance cannot make this check itself: it calls `reset()`,
 which rebuilds the board, so its before/after comparison is empty-vs-empty.
-That test is kept and renamed `test_empty_d4_stays_empty_byte_identical`
-(5 B empty pickle either side) — it now states only what it measures.
+That test — `test_empty_d4_stays_empty_byte_identical` — was **deleted in
+round 9a**: the empty-vs-empty snapshot no longer describes the live policy
+(D4 now grows by real gate sediments, §15.4).  The invariant the deleted
+test used to state is covered instead by the seed-0 rejection trace — a
+real, unselected trace on which the gate never passes and D4 is never
+written: `board.d4 == []`, `d4_byte_identical is True`, `d4_sediments == 0`,
+asserted in
+`test_physics_run.TestPreAdoptionValidation.test_rejection_trace_has_no_birth_no_activation`.
 
 ### 14.6 Single-stream executor acceptance (measured)
 
@@ -806,12 +820,12 @@ never emission counts.
 | `placeholder` ⇒ None in the executor envelope | `...test_placeholder_envelopes_are_none` |
 | absent fid asserts, no fallback | `...test_absent_fid_asserts_and_never_falls_back` |
 | source failure is not a charge | `test_physics_run.TestSourceFailureIsNotACharge` |
-| #22 gate derived output / no-op / identity B | `test_physics_run.TestZeroConfidenceGate` (9 tests) |
+| #22 gate derived output / no-op / identity B | `test_physics_run.TestZeroConfidenceGate` (8 tests) |
 | gate blocked: no evidence, no active overlay, harmful evidence | `...test_gate_blocked_without_evidence`, `...test_gate_blocked_with_evidence_but_no_active_overlay`, `...test_gate_blocked_on_harmful_evidence` |
-| gate passing branch (injected evidence, conf 0.5, D4 sediment) | `...test_gate_passes_on_published_beneficial_evidence` |
-| acceptance gate blocked by measured harm (no double) | `...test_acceptance_gate_blocked_by_measured_harm` |
-| D4 false-positive guard only (empty-vs-empty) | `...test_empty_d4_stays_empty_byte_identical` |
-| D4 non-vacuous retention (121 B, one body, same object, 35 no-ops) | `...test_retained_invariant_survives_the_scenario` |
+| gate passing branch (injected evidence, conf 0.5, D4 sediment; the real passing branch is measured separately) | `...test_gate_passes_on_published_beneficial_evidence`, `...test_d4_sediments_are_the_real_gate_output` |
+| acceptance gate blocked by measured harm (no double) — round-8 only; removed in round 9a | replaced by `...test_d4_moves_only_by_real_gate_sediments` and the seed-0 rejection-trace assertions (`...TestPreAdoptionValidation.test_rejection_trace_has_no_birth_no_activation`: D4 empty, byte-identical) |
+| D4 false-positive guard only (empty-vs-empty) — round-8 only; removed in round 9a | replaced by the seed-0 rejection trace (`board.d4 == []`, `d4_byte_identical is True`) |
+| D4 non-vacuous retention (round 9a: 11 real gate sediments, ticks 21–31; retained prefix byte- and object-identical; 25 no-ops) | `...test_retained_invariant_survives_the_scenario` |
 | patch attach/eviction, no orphans, byte ceilings | `test_physics_run.TestPatchAccounting` (5) |
 | full-patch birth refused pre-commit, clean state; head still attaches | `test_physics_run.TestFullPatchModeFailsClosed` (2) |
 | P6 reset: two accepted traces identical | `test_physics_run.TestResetRepeatability` (2) |
@@ -863,7 +877,10 @@ never emission counts.
     overlay exists that early, so the real gate cannot pass there), drives
     the same 36-tick scenario without `reset()`, and measures **121 B
     retained before and after, byte identical, one body, same object, 35
-    absorbed no-ops** (measured, not inferred).
+    absorbed no-ops** (measured, not inferred).  **Superseded by notes 33
+    and 40:** the empty-D4 test was deleted in round 9a (D4 now grows by
+    real gate sediments) and the round-9a retention probe uses no test
+    double at all.
 24. **Timings:** full suite with `LEAN_BIN=$PWD/.work/lean4/bin/lean
     python3 -m unittest discover -s tests -t .` = **289 tests, OK, 42.1 s,
     1 expected failure** (the honest single-stream drop gate; the new
@@ -970,7 +987,8 @@ applied first, at fit time.
 | 64 | 20,480 | 64 (cap) | 12,352 | 49,408 B |
 | 256 | 81,920 | 64 (cap) | 12,352 | 49,408 B |
 
-The rank ceiling `min(D, H) = 64` binds from `N >= 64`.  The two dense forms
+The rank ceiling `min(D, H) = 64` binds from `N = 39` (measured: N = 38 →
+rank 63, K = 12,160; N = 39 → rank 64, K = 12,352).  The two dense forms
 are **inadmissible at every reachable N**: the dense head+norm patch is
 34,240 parameters and the full predictor is 210,920, both above the largest
 admissible patch (`K(64) = 12,352`).  They are a different patch class, not
@@ -1031,10 +1049,26 @@ The refusal path is the user's "interference check moved upstream": the
 rejected candidate never becomes a D2 record, never activates, and never
 touches D4.
 
+**Scope: the executor proposal path, not the legacy ratchet path.**  The
+validation above is enforced on the executor's proposal path —
+`PhysicsRun._should_propose` → `propose_overlay_from_buffer` →
+`resolve_proposal`.  The organ's legacy ratchet path
+`_decide_tick` → `_adopt_or_revalidate` → `_fit_overlay` →
+`overlay_table.birth` (`amateur/physics/organ.py` ~1496–1585) still births
+**without** a proposal or a validation window.  The organ-level
+`acceptance_scenario` bank probe uses that legacy path: measured, it records
+`proposals == 0`, `decisions == 0`, `rejections == 0` and births at ticks 19
+and 35.  The bank fit ratio 0.8225682511949177 (§15.7) is therefore a
+fit-quality diagnostic, **not** evidence for INV-VALIDATION.  Validating or
+gating that legacy path is open work for the next round; no code was changed
+in round 9a or in this correction.
+
 ### 15.4 The registered trace (seed 7, measured)
 
-36 executor ticks: normal 8, flip at 8, flip back at 28, recovery 8.  The
-birth is at the **decision** tick 18.  Every number below is measured.
+36 executor ticks: normal rows 1–7 (7 ticks — the flip is applied before
+tick 8, so there is no normal row for tick 8 and `normal_mean` averages the
+7 measured rows), flip at 8, flip back at 28, recovery 8.  The birth is at
+the **decision** tick 18.  Every number below is measured.
 
 | frame tick | phase | adapted surprise | base surprise | overlay | validation n | decision |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -1139,7 +1173,9 @@ is withdrawn.  Re-measured under the capacity bound:
 
 Both remain genuine held-out improvements, but smaller: the admissible patch
 adapts only `head.2` (rank ≤ 64), not the head+norm block, and the bank fit
-uses rank 64 / 12,352 params / 49,408 B (N = 384 used transitions, capped).
+uses rank 64 / 12,352 params / 49,408 B (measured from `organ.fit_history`:
+`budget_n = 240` used transitions at the first birth fit and `budget_n =
+624` at the re-adoption fit — not 384).
 The per-transition worst case in the organ split is 1.04857 (still < 1.05).
 The organ-level bank probe still adopts at 19, goes stale at 31 and evicts
 at 34; it then **re-adopts the same `motif-debris-007` at 35** once the
@@ -1169,7 +1205,7 @@ ends empty.
 | per-tick validation visibility, no peeking in the trace | `...test_validation_trace_is_visible_per_tick`, `...test_no_peek_in_the_per_tick_trace` |
 | capacity-bounded patch attaches (20,224 B) and evicts atomically | `test_physics_run.TestPatchAccounting` (5) |
 | oversized synthetic patch refused in the derivation pass | `...TestFullPatchModeFailsClosed.test_oversized_synthetic_patch_fails_in_the_derivation_pass` |
-| real gate sediments (11) and non-vacuous D4 retention | `test_physics_run.TestZeroConfidenceGate` (9) |
+| real gate sediments (11, ticks 21–31), non-vacuous D4 retention (retained prefix byte- and object-identical), gate blocked again after eviction | `test_physics_run.TestZeroConfidenceGate` (8) |
 | P6 reset: two accepted traces identical (birth 18, stale 31, evict 35, 1.0461437156029878) | `test_physics_run.TestResetRepeatability` (2) |
 | single-stream drop (recorded failure, re-justified) | `...test_single_stream_surprise_drops` (`expectedFailure`) |
 
@@ -1246,11 +1282,19 @@ ends empty.
     `LEAN_BIN=$PWD/.work/lean4/bin/lean python3 -m unittest discover -s
     tests -t .`: **312 tests, OK (1 expected failure), 44.34 s**.
     `python3 tools/gen_lean.py` exit 0 and byte-identical to
-    `formal/DryRun.lean`; `formal/`, `tools/` and `docs/TESTING.md` untouched.
+    `formal/DryRun.lean`; `formal/` and `tools/` untouched.  **`docs/TESTING.md`
+    was *not* untouched**: it was modified in commit `e6d6051` (+86 lines)
+    by the implementer, although the task contract said "Do NOT edit
+    `docs/TESTING.md` (Lead owns)" and the declared write scope excluded it.
+    The Lead has reviewed that change and adopts it (Lead-owned file); the
+    audit corrections in this round were made with delegated permission and
+    are stated in the file itself.  This correction supersedes the false
+    "`docs/TESTING.md` untouched" claim that previously stood here.
 38. **D2 revalidation is unchanged and still fires on the birth tick.**
     The ratchet revalidates an active overlay whenever the tick's mean
     surprise is below the debris threshold, so on the registered trace the
-    record is revalidated at finalized ticks 18–27 (epochs 2–10) even though
+    record is revalidated at finalized ticks **18, 19, 20, 21, 22, 23, 24,
+    26, 27** (epochs 2–10; tick 25 is *not* a revalidation) even though
     the tick-18 observation predates the patch (the birth is decided after
     that tick's prediction).  This is the pre-existing `_decide_tick` rule
     from phase 4–5b, not a 9a change; it is disclosed because the D2 epoch
@@ -1259,3 +1303,49 @@ ends empty.
 39. **CPU only.**  All fits and scenario runs are single-process CPU
     (`torch.set_num_threads(min(8, cpu_count))` in the test modules); no GPU
     path is exercised or claimed.
+40. **Test deletions and one relaxed end-state assertion.**  The 9a
+    checklist item "no test deleted / no assertion weakened" is **not met
+    in the strict sense**.  At commit `4718162` (the round-8 state)
+    `tests/test_physics_run.py` contained three tests that no longer exist:
+    `test_empty_d4_stays_empty_byte_identical`,
+    `test_acceptance_gate_blocked_by_measured_harm` and
+    `test_d4_serialized_bytes_unchanged`.  All three were removed in round
+    9a; the invariants they stated are preserved as follows:
+    - D4 empty on a trace that never writes: `test_empty_d4_stays_empty_byte_identical`
+      → the seed-0 rejection trace (`board.d4 == []`, `d4_byte_identical is
+      True`, `d4_sediments == 0`) in
+      `TestPreAdoptionValidation.test_rejection_trace_has_no_birth_no_activation`.
+    - gate blocked under measured harm, no double sediment:
+      `test_acceptance_gate_blocked_by_measured_harm` → the gate-blocked
+      cases in `TestZeroConfidenceGate` (`test_gate_blocked_without_evidence`,
+      `...test_gate_blocked_with_evidence_but_no_active_overlay`,
+      `...test_gate_blocked_on_harmful_evidence`) plus the real 11-sediment
+      measurement in `test_d4_sediments_are_the_real_gate_output`.
+    - D4 serialized bytes unchanged before/after a scenario:
+      `test_d4_serialized_bytes_unchanged` →
+      `test_retained_invariant_survives_the_scenario` (retained prefix
+      byte-identical and object-identical) plus the seed-0 rejection trace
+      (whole-list byte-identity when nothing is ever written).
+    One assertion was **relaxed**:
+    `test_physics_organ.TestAcceptanceScenario.test_birth_revalidate_stale_evict_ordering`
+    used to assert `len(overlay_table) == 0` and active `()` at the end of
+    the 36-tick bank probe; it now asserts active `["ovr-02"]` because the
+    ratchet re-adopts the same motif at tick 35.  That relaxation reflects
+    measured behaviour (the tick-35 re-adoption is round-9b trigger-gating,
+    §15.6) and is disclosed rather than treated as an invariant.  Net: the
+    `@expectedFailure` on the registered acceptance metric is still strict
+    and unweakened; the deletions and the relaxation are real and recorded
+    here.
+41. **Validation scope and one admission boundary.**  The claim
+    "pre-adoption validation is universal" is **false as written**; it is
+    scoped to the executor proposal path (§15.3).  The organ's legacy
+    ratchet path still births unvalidated, and the bank probe that produces
+    0.8225682511949177 runs on that path (measured: `proposals == 0`,
+    `decisions == 0`, `rejections == 0`, births at ticks 19 and 35), so
+    that ratio is a fit-quality diagnostic, not INV-VALIDATION evidence.
+    Separately, `capacity.EvidenceBudget(0).admit_params(0)` returns
+    `True` — a zero-parameter patch is "admitted" at N = 0 even though
+    `max_rank = 0` and `max_params = 0`.  This is a boundary looseness in
+    the admission predicate, not a behaviour bug: the fit path refuses
+    `max_rank < 1` and records `capacity` / `no-evidence`.  Recorded as
+    found; no code was changed in this correction.
