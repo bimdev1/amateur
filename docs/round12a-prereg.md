@@ -171,10 +171,25 @@ to fit and at least one out-of-sample transition to test — one transition
 has no held-out sample, and the capacity bound already admits a rank-1
 patch at `N = 2` (`K(1)=256 <= 640`).
 
-Pre-registered consequence to verify: seed 0 births at its first spike
-(frame 9) with a **small** candidate (`N = 9` => `K <= 2,880`, rank 14,
-`K = 2,752` vs 5,056 at N=16) and it is **refused** — the
-rejection-before-birth branch exercised on the registered configuration.
+Pre-registered consequences to verify:
+
+* seed 0 births at its first spike (frame 9) with a **small** candidate
+  (`N = 9` => `K <= 2,880`, rank 14, `K = 2,752` vs 5,056 at N=16) and it
+  is **refused** — the rejection-before-birth branch exercised on the
+  registered configuration.
+* **seed 7's registered birth moves from t19 to t12** (its first spike;
+  the old guard skipped t12 because it was below the magic 16). That is
+  the intended consequence of removing the arbitrary guard, not a
+  regression: the candidate is born at the onset of the perturbation with
+  `N = 12` (`K <= 3,840`, rank 19, `K = 3,712`) and its residence evidence
+  then spans the flipped phase and the recovery phase. The Round-11 trace
+  (birth t19, K=5056) is **not** the 12a registered trace; it is
+  reproduced separately, by a clearly labelled historical diagnostic
+  (`trigger="round11"`, i.e. the old `tick >= fit_window` guard, floor
+  ablated), for the §3.5 retroactive falsifier.
+* the end state of the registered run is no longer "nursery empty": with
+  the floor refusing every candidate, the (bounded, non-steering)
+  candidate remains resident at tick 36.  Reported as measured state.
 
 ## 5. Motif thresholds — derived per regime, not tuned
 
