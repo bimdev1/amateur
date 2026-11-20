@@ -134,7 +134,9 @@ derived; D1/D3 reads stay synthetic because those stores are unimplemented
 in the dry run.
 
 Physics mode (`PhysicsRun` / `PhysicsSource`, Q1–Q4 = A) moves ten more
-flows to `derived`, so **11/26 derived** in physics mode:
+flows to `derived`, so **14/26 derived** in physics mode (11 non-read flows
+plus the three store reads #7/#8/#25; an earlier "11/26" here counted only
+the non-read column — corrected 2026-11-20, code unchanged):
 
 | # | Physics-mode body | Class |
 | --- | --- | --- |
@@ -153,7 +155,10 @@ Still placeholders in physics mode, by Lead decision: #1 (E2 gradient),
 #2 (crystallized output), #4/#5 (E1 exhaust), #9 (routed dynamics), #13
 (D1 write), #16 (P4 cost/error — P4 is unimplemented). D1 reads
 (#11/#14/#15) and D3 reads (#20/#26) remain placeholders: D1 is
-unimplemented and D3 is written but not read this round. The trigger-gated
+unimplemented and D3 is written but not read this round. **In progress
+(provenance #13/#16 slice, design §9):** #13, #14 and #16 become derived
+(→ 17/26); #11/#15/#20/#26 stay placeholders behind the D1-content and
+D3-read prerequisite slices. The trigger-gated
 flows carry exact-type **no-op sentinels** on non-event ticks (`ovr-noop`,
 `debris-none`, `motif-none`, `none`), and #22 carries the Q4 gate body
 (confidence 0 when blocked; round 9a's capacity-bounded patch passes on
