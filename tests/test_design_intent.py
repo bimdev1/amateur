@@ -119,11 +119,20 @@ class TestCarrierSemantics(unittest.TestCase):
 
 
 class TestCrystalLexicon(unittest.TestCase):
-    """The round-10 audit record, pinned so the correction cannot silently
-    reopen.  The old lexicon (candidate into 5.0, motif out of 5.0,
-    survivor `6.0 -> D2`) was built on the drifted transcription; the
-    corrected ASCII reading is the spec and the lexicon is explicitly
-    marked as being rewritten / not authoritative."""
+    """Ruling D lexicon (round 11): three payload kinds / three surfaces.
+
+    - #18 `Emergent Crystals` is the **candidate** write into D2;
+    - #23 `Surviving Crystals` is a **read-time selection** from D2, not a
+      third overlay status and not a store;
+    - #21 `Structural Motifs` is a D3 read;
+    - the three storage surfaces are the D2 candidate index, the D2 overlay
+      index, and the D3 debris pool;
+    - `Crystallized Output` (#2) is P1 -> E2 boundary output, **not** a D2
+      crystal.
+
+    The round-10 audit record below remains pinned so the superseded
+    lexicon cannot silently return.
+    """
 
     def _doc(self) -> str:
         path = Path(__file__).resolve().parents[1] / "v0.10-untested.md"
@@ -169,6 +178,68 @@ class TestCrystalLexicon(unittest.TestCase):
         doc = self._doc()
         self.assertIn("Superseded readings", doc)
         self.assertNotIn("Lexicon pinned", doc)
+
+
+class TestRulingDLexicon(unittest.TestCase):
+    def test_crystallized_output_is_not_a_d2_crystal(self) -> None:
+        from amateur.payloads import PAYLOAD_SCHEMA
+
+        flow = {f.fid: f for f in ledger.FLOW_LEDGER}
+        self.assertEqual(flow[2].flow, "Crystallized Output")
+        self.assertEqual(flow[2].target, ledger.E2)
+        self.assertNotEqual(flow[2].target, ledger.D2)
+        self.assertEqual(PAYLOAD_SCHEMA[2], frozenset({type(None)}))
+
+    def test_surviving_crystal_is_a_read_not_a_status(self) -> None:
+        from amateur.payloads import (
+            PAYLOAD_SCHEMA,
+            MatOverlay,
+            SurvivingCrystalBody,
+        )
+
+        flow = {f.fid: f for f in ledger.FLOW_LEDGER}
+        self.assertEqual(flow[23].source, ledger.D2)
+        self.assertEqual(flow[23].target, ledger.P6)
+        self.assertTrue(flow[23].flow.endswith("(read)"))
+        self.assertIn(
+            SurvivingCrystalBody, PAYLOAD_SCHEMA[23]
+        )
+        self.assertFalse(
+            [
+                f for f in ledger.FLOW_LEDGER
+                if "Surviving" in f.flow and f.target == ledger.D2
+            ]
+        )
+        with self.assertRaises(ValueError):
+            MatOverlay(0, "x", "surviving")
+
+    def test_three_kinds_and_three_storage_surfaces(self) -> None:
+        from amateur.payloads import (
+            EmergentCrystalBody,
+            MatOverlay,
+            PAYLOAD_SCHEMA,
+            StructuralMotifBody,
+            SurvivingCrystalBody,
+        )
+
+        crystal_kinds = {
+            EmergentCrystalBody,
+            SurvivingCrystalBody,
+            StructuralMotifBody,
+        }
+        self.assertEqual(len(crystal_kinds), 3)
+        self.assertIn(EmergentCrystalBody, PAYLOAD_SCHEMA[18])
+        self.assertIn(SurvivingCrystalBody, PAYLOAD_SCHEMA[23])
+        self.assertIn(StructuralMotifBody, PAYLOAD_SCHEMA[21])
+        # Three storage surfaces: D2 candidate index, D2 overlay index, D3.
+        from amateur.payloads import DebrisPool, MatBoard
+
+        board = MatBoard(seed=False)
+        pool = DebrisPool()
+        self.assertTrue(hasattr(board, "_nursery"))
+        self.assertTrue(hasattr(board, "_residents"))
+        self.assertTrue(hasattr(pool, "_entries"))
+        self.assertIsNotNone(MatOverlay)
 
 
 if __name__ == "__main__":

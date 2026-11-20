@@ -19,9 +19,56 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from amateur.dryrun import FLOW_OPS  # noqa: E402
+import amateur.dryrun as _dryrun  # noqa: E402
+import amateur.payloads as _payloads  # noqa: E402
 from amateur.ledger import FLOW_LEDGER  # noqa: E402
 from amateur.payloads import D2_WRITES, D4_WRITES, MAT_CAPACITY  # noqa: E402
+
+FLOW_OPS = _dryrun.FLOW_OPS
+
+# Round 11 wave 2 renames `dryrun.CYCLE_FLOWS` to
+# `dryrun.STAGE_BACKWARD_FLOWS` (INV-CYCLE-DELAY -> INV-STAGE-ORDER). The
+# generated op table must not move, so try the new name and fall back to
+# the old one; the resolved tuple is then checked against the window the
+# static profile markers (`fbox`, `warm_noncycle`) hard-code.
+CYCLE_FLOWS_SOURCE = "amateur.dryrun.STAGE_BACKWARD_FLOWS"
+CYCLE_FLOWS = getattr(_dryrun, "STAGE_BACKWARD_FLOWS", None)
+if CYCLE_FLOWS is None:
+    CYCLE_FLOWS_SOURCE = "amateur.dryrun.CYCLE_FLOWS"
+    CYCLE_FLOWS = _dryrun.CYCLE_FLOWS
+CYCLE_FLOWS = tuple(CYCLE_FLOWS)
+
+# Round 11 ruling A: the D2 write channels are pinned per flow -- #18
+# births a candidate into the candidate index, #24 ratchets an overlay
+# into the overlay index. `amateur.payloads` owns the schema; the pins
+# are checked against `D2_WRITES` here so the Lean mirror cannot drift.
+CANDIDATE_WRITE_FIDS = (18,)
+OVERLAY_WRITE_FIDS = (24,)
+
+# Round 11 contract pin: the candidate index holds at most 4 records. It
+# lands in `amateur.payloads` with provenance-scout's rewrite; import it
+# when it is there, otherwise fall back to the contracted number.
+NURSERY_CAPACITY_SOURCE = "amateur.payloads.NURSERY_CAPACITY"
+NURSERY_CAPACITY = getattr(_payloads, "NURSERY_CAPACITY", None)
+if NURSERY_CAPACITY is None:
+    NURSERY_CAPACITY = 4
+    NURSERY_CAPACITY_SOURCE = "round-11 contract pin"
+
+if CYCLE_FLOWS != (10, 17):
+    raise SystemExit(
+        f"gen_lean: cycle window is {CYCLE_FLOWS!r} (from "
+        f"{CYCLE_FLOWS_SOURCE}), but fbox/warm_noncycle hard-code (10, 17) "
+        "and the round-11 contract freezes the op table: update the "
+        "generator and the contract together."
+    )
+if set(CANDIDATE_WRITE_FIDS) & set(OVERLAY_WRITE_FIDS) or set(
+    CANDIDATE_WRITE_FIDS
+) | set(OVERLAY_WRITE_FIDS) != set(D2_WRITES):
+    raise SystemExit(
+        "gen_lean: the per-flow D2 write pins "
+        f"{CANDIDATE_WRITE_FIDS} / {OVERLAY_WRITE_FIDS} do not partition "
+        f"payloads.D2_WRITES = {sorted(D2_WRITES)}."
+    )
 
 LEAN_OP = {
     "emit": "Op.emit",
@@ -30,7 +77,6 @@ LEAN_OP = {
     "sink": "Op.sink",
 }
 SINK_FLOWS = (2, 4, 5)
-CYCLE_FLOWS = (10, 17)
 
 HEADER = """/-! Formal model of the v0.10 dry run: the per-flow mailbox recurrence
 under reject-with-charge admission (user-adjudicated channel semantics).
@@ -63,7 +109,13 @@ Over the tick-indexed accumulators from an all-zero start:
 - `fold_attempt` / `fold_event`: the two word-generic conservation
   identities (adjudicated): attempted = accepted + refused, and
   accepted = consumed + delta-sunk + depth, with `attempts_at_master` /
-  `balance_at_master` at the master profile.
+  `balance_at_master` at the master profile;
+- `d2_write_split` / `candidate_recorded_from_birth`: the D2 write
+  channels are pinned per flow (#18 candidate birth, #24 overlay
+  ratchet), disjoint and exactly the D2 writes;
+- `nursery_*`: the candidate index has its own lifecycle, separate from
+  the overlay-index policy (`mat_*_policy`), which is unchanged and is
+  not restated.
 -/
 
 inductive Op where
@@ -681,6 +733,10 @@ theorem balance_at_master : ∀ i : Nat, 1 ≤ i → i < 28 →
 
 D4_IDS = ", ".join(str(f) for f in sorted(D4_WRITES))
 D2_IDS = ", ".join(str(f) for f in sorted(D2_WRITES))
+CAND_IDS = ", ".join(str(f) for f in CANDIDATE_WRITE_FIDS)
+OVL_IDS = ", ".join(str(f) for f in OVERLAY_WRITE_FIDS)
+BIRTH_FID = CANDIDATE_WRITE_FIDS[0]
+OVERLAY_FID = OVERLAY_WRITE_FIDS[0]
 _WRITE_FIDS = sorted(D4_WRITES) + sorted(D2_WRITES)
 WRITE_CONJ = " ∧\n      ".join(
     f"(opsOf {f}).getLast? = some Op.consume" for f in _WRITE_FIDS
@@ -690,48 +746,365 @@ WRITE_TACTICS = ", ".join("by decide" for _ in _WRITE_FIDS)
 PAYLOADS = f"""
 /-! ## Typed geometry payloads
 
-Payload schema (user-adjudicated):
+Payload schema (user-adjudicated, round 11 ruling A):
 
-- D2 (Multi-Layer Mat) writes {sorted(D2_WRITES)} carry epoch-stamped
-  overlays: #18 is the loop's candidate birth (3.0 -> D2, PROVISIONAL
-  round 10) and #24 the ratchet's revalidated overlay; the #23 surviving
-  -crystal read and the #25 stale read take the stored records;
+- the D2 (Multi-Layer Mat) write channels are pinned **per flow**: #18
+  births one candidate record into the candidate index (kind `crystal`,
+  so 18 -> crystal) and #24 ratchets one revalidated overlay into the
+  overlay index (kind `overlay`, so 24 -> overlay). The split is
+  `candidateWriteFids = [{CAND_IDS}]`, `overlayWriteFids = [{OVL_IDS}]`:
+  disjoint, together exactly `d2WriteFids = [{D2_IDS}]`, and both absorbed
+  (recorded) on the spine;
+- the candidate kind is `crystal` (an unvetted emergent crystal living in
+  the nursery) and the ratcheted kind is `overlay`; a candidate is not an
+  overlay and vice versa, and `d2Allowed` is exactly their union. (The
+  Python exact-type gate on `PAYLOAD_SCHEMA` is what rejects a body of
+  the wrong kind; this mirror states the partition.)
+- the candidate index is a separate store with its own lifecycle (below);
 - D4 (Base Core) write {sorted(D4_WRITES)} carries bias primitives only.
   The whitelist closes the channel by construction: a trajectory,
   state-delta, or context payload kind is not forbidden on D4 -- it is
   unrepresentable;
-- the D2 mat lifecycle recycles one overlay per tick and evicts past
+- the overlay index recycles one overlay per tick and evicts past
   capacity {MAT_CAPACITY}, so no resident epoch falls more than one tick
   behind the present (INV-NO-OSSIFY). -/
 
 inductive PayloadKind where
-  | traj | delta | ctx | overlay | bias
+  | traj | delta | ctx | overlay | crystal | bias
   deriving DecidableEq
 
 def d4Allowed : List PayloadKind := [PayloadKind.bias]
-def d2Allowed : List PayloadKind := [PayloadKind.overlay]
+def d2Allowed : List PayloadKind := [PayloadKind.overlay, PayloadKind.crystal]
+def candidateAllowed : List PayloadKind := [PayloadKind.crystal]
+def overlayAllowed : List PayloadKind := [PayloadKind.overlay]
 def forbiddenOfGeometry : List PayloadKind :=
   [PayloadKind.traj, PayloadKind.delta, PayloadKind.ctx]
 
-def d4WriteFids : List Nat := [{", ".join(str(f) for f in sorted(D4_WRITES))}]
-def d2WriteFids : List Nat := [{", ".join(str(f) for f in sorted(D2_WRITES))}]
+def d4WriteFids : List Nat := [{D4_IDS}]
+def d2WriteFids : List Nat := [{D2_IDS}]
+def candidateWriteFids : List Nat := [{CAND_IDS}]
+def overlayWriteFids : List Nat := [{OVL_IDS}]
 
 /-- INV-EMPTINESS as a type-level fact: the forbidden kinds are excluded
-from every geometry write channel. -/
+from every geometry write channel. Adding `crystal` to the D2 channel
+does not open it: the purity statement is about traj/delta/ctx only. -/
 theorem geometry_write_channel_purity :
     ∀ k ∈ forbiddenOfGeometry, k ∉ d4Allowed ∧ k ∉ d2Allowed := by
   intro k hk
   cases k <;> simp_all [d4Allowed, d2Allowed, forbiddenOfGeometry]
 
 /-- Both geometry write channels are absorbed (compiled to consume) on
-the spine.  Round 10: only #22/#24 are ratchet-owned; #18 is owned by
-the loop (3.0 -> D2 births the candidate), so the prior "ratchet-owned"
-reading is withdrawn. -/
+the spine.  Round 11: #18 births the candidate (candidate index) and #24
+ratchets the overlay (overlay index); each D2 write flow is one of the
+two, so neither reading is optional. -/
 theorem geometry_writes_absorbed :
     d4WriteFids = [{D4_IDS}] ∧ d2WriteFids = [{D2_IDS}] ∧
       {WRITE_CONJ} :=
   ⟨rfl, rfl, {WRITE_TACTICS}⟩
 
+/-- Ruling A, per-flow write pin: the candidate-birth channel and the
+overlay-ratchet channel are disjoint and together are exactly the D2
+writes; both are absorbed on the spine. -/
+theorem d2_write_split :
+    candidateWriteFids ++ overlayWriteFids = d2WriteFids ∧
+    (∀ f : Nat, f ∈ candidateWriteFids → f ∉ overlayWriteFids) ∧
+    (opsOf {BIRTH_FID}).getLast? = some Op.consume ∧
+    (opsOf {OVERLAY_FID}).getLast? = some Op.consume := by
+  refine ⟨rfl, by decide, by decide, by decide⟩
+
+/-- The body type pin: the D2 candidate index is written by exactly one
+flow and stored as exactly one kind -- #{BIRTH_FID} births the `crystal`
+kind.  Nat-level companion to the Python exact-type gate on
+`PAYLOAD_SCHEMA[{BIRTH_FID}]`. -/
+theorem candidate_recorded_from_birth :
+    candidateWriteFids = [{CAND_IDS}] ∧
+    (∀ f : Nat, f ∈ candidateWriteFids → f ∈ d2WriteFids) ∧
+    candidateAllowed = [PayloadKind.crystal] ∧
+    d2Allowed = overlayAllowed ++ candidateAllowed ∧
+    (opsOf {BIRTH_FID}).getLast? = some Op.consume := by
+  refine ⟨rfl, by decide, rfl, rfl, by decide⟩
+"""
+
+
+NURSERY = f"""
+/-! ## Candidate index (D2 nursery) lifecycle
+
+Ruling A splits the D2 store: the overlay index keeps its policy
+(`mat_*_policy`, unchanged and deliberately not restated here) and the
+candidate index is a second store with its own lifecycle. The recurrence
+is pure and core-only: `nurseryTick` births the tick's own id (append)
+and drops the oldest record iff the index is over `NURSERY_CAPACITY`;
+`promote` removes a candidate id, which is the #22 lineage consumption;
+`nurseryContinue` replays the birth/eviction tick from an arbitrary
+promoted state.
+
+- `nurseryTick_length` / `nursery_bounded`: the index never holds more
+  than `NURSERY_CAPACITY` candidates. The step lemma carries the incoming
+  capacity as an explicit hypothesis, because a single tick cannot shrink
+  an already-oversized index by more than one record;
+- `nursery_birth_member`: the birth id of a tick is in the state right
+  after its own birth -- eviction drops the oldest record, never the
+  newborn (the unconditional form, no hypothesis needed);
+- `nursery_fresh`: the id *born* at tick t is still resident at tick
+  t + 1 (one tick of guaranteed residence for a newborn). This is not the
+  claim that every resident survives one tick -- the oldest of four
+  residents is evicted by the next birth. The hypothesis `1 ≤ t` is
+  explicit: the run starts empty and its first birth id is 1, so at
+  t = 0 the statement has no subject;
+- `nursery_runs_distinct`: ids are pairwise distinct in every state, so a
+  fresh birth never resurrects an evicted id;
+- `nursery_promote_resident`: promoting an id that is not resident is the
+  identity -- there is no state effect to hide behind a refusal;
+- `nursery_promote_once` / `nursery_promote_twice`: an id promoted out at
+  tick t is absent from every later state of the continued run, hence a
+  second promotion of the same id is the identity (INV-PROMOTE-ONCE).
+-/
+
+/-- One nursery tick: FIFO birth (append the tick's own id), then drop
+the oldest record iff the index exceeds `NURSERY_CAPACITY`. -/
+def nurseryTick (l : List Nat) (t : Nat) : List Nat :=
+  if (l ++ [t]).length > {NURSERY_CAPACITY} then (l ++ [t]).drop 1 else l ++ [t]
+
+/-- The nursery state after t ticks from empty. -/
+def nurseryRun : Nat → List Nat
+  | 0 => []
+  | t + 1 => nurseryTick (nurseryRun t) (t + 1)
+
+/-- #22 lineage consumption: drop a candidate id from the index. -/
+def promote : List Nat → Nat → List Nat
+  | [], _ => []
+  | a :: rest, id => if a = id then promote rest id else a :: promote rest id
+
+theorem nurseryTick_mem_append {{l : List Nat}} {{t e : Nat}}
+    (he : e ∈ nurseryTick l t) : e ∈ l ++ [t] := by
+  unfold nurseryTick at he
+  by_cases hc : (l ++ [t]).length > {NURSERY_CAPACITY}
+  · rw [if_pos hc] at he
+    exact List.mem_of_mem_drop he
+  · rw [if_neg hc] at he
+    exact he
+
+theorem nurseryTick_mem {{l : List Nat}} {{t e : Nat}}
+    (he : e ∈ nurseryTick l t) : e ∈ l ∨ e = t := by
+  have h1 : e ∈ l ++ [t] := nurseryTick_mem_append he
+  rw [List.mem_append] at h1
+  rcases h1 with h | h
+  · exact Or.inl h
+  · exact Or.inr (by simpa using h)
+
+theorem nurseryTick_length (l : List Nat) (t : Nat)
+    (h : l.length ≤ {NURSERY_CAPACITY}) :
+    (nurseryTick l t).length ≤ {NURSERY_CAPACITY} := by
+  have hlen : (l ++ [t]).length = l.length + 1 := by simp
+  unfold nurseryTick
+  by_cases hc : (l ++ [t]).length > {NURSERY_CAPACITY}
+  · rw [if_pos hc, List.length_drop, hlen]
+    omega
+  · rw [if_neg hc, hlen]
+    omega
+
+theorem nursery_bounded : ∀ t : Nat,
+    (nurseryRun t).length ≤ {NURSERY_CAPACITY} := by
+  intro t
+  induction t with
+  | zero => simp [nurseryRun]
+  | succ k ih => exact nurseryTick_length _ _ ih
+
+theorem nurseryRun_le : ∀ (t e : Nat), e ∈ nurseryRun t → e ≤ t := by
+  intro t
+  induction t with
+  | zero => intro e he; simp [nurseryRun] at he
+  | succ k ih =>
+      intro e he
+      have h1 := nurseryTick_mem he
+      rcases h1 with h | h
+      · have := ih e h; omega
+      · omega
+
+theorem mem_drop_one_cons {{a : Nat}} {{r : List Nat}} {{t : Nat}} :
+    t ∈ ((a :: r) ++ [t]).drop 1 := by
+  show t ∈ (a :: (r ++ [t])).drop 1
+  cases r with
+  | nil => simp
+  | cons b s => simp
+
+theorem mem_drop_one_append (l : List Nat) (t : Nat) (h : l ≠ []) :
+    t ∈ (l ++ [t]).drop 1 := by
+  cases l with
+  | nil => exact absurd rfl h
+  | cons a r => exact mem_drop_one_cons
+
+/-- The birth id of tick `t + 1` is in the state right after its own
+birth: the unconditional form of freshness (no hypothesis needed). -/
+theorem nursery_birth_member (t : Nat) : t + 1 ∈ nurseryRun (t + 1) := by
+  show t + 1 ∈ nurseryTick (nurseryRun t) (t + 1)
+  unfold nurseryTick
+  by_cases hc : ((nurseryRun t) ++ [t + 1]).length > {NURSERY_CAPACITY}
+  · rw [if_pos hc]
+    exact mem_drop_one_append _ _ (by
+      intro h0
+      rw [h0] at hc
+      simp at hc)
+  · rw [if_neg hc]
+    simp
+
+/-- Appending then dropping the front keeps the tail, for a non-empty
+incoming record list. -/
+theorem drop_one_append (l : List Nat) (t : Nat) (h : l ≠ []) :
+    (l ++ [t]).drop 1 = l.drop 1 ++ [t] := by
+  cases l with
+  | nil => exact absurd rfl h
+  | cons a r => rfl
+
+/-- The newest record is always the last one: one tick appends its own id
+and eviction drops the oldest record. -/
+theorem nurseryRun_getLast (t : Nat) :
+    (nurseryRun (t + 1)).getLast? = some (t + 1) := by
+  show (nurseryTick (nurseryRun t) (t + 1)).getLast? = some (t + 1)
+  unfold nurseryTick
+  by_cases hc : ((nurseryRun t) ++ [t + 1]).length > {NURSERY_CAPACITY}
+  · rw [if_pos hc, drop_one_append _ _ (by
+      intro h0
+      rw [h0] at hc
+      simp at hc)]
+    simp
+  · rw [if_neg hc]
+    simp
+
+/-- Freshness, one tick of residence: an id resident at tick `t` is still
+resident at tick `t + 1` -- eviction drops the oldest record, never the
+newest, so a birth survives at least one further tick. The hypothesis
+`1 ≤ t` is explicit because the run starts empty and its first birth id is
+1: there is no id 0, so at t = 0 the statement has no subject. -/
+theorem nursery_fresh (t : Nat) (h : 1 ≤ t) : t ∈ nurseryRun (t + 1) := by
+  have hbirth : t ∈ nurseryRun t := by
+    have h0 := nursery_birth_member (t - 1)
+    rwa [Nat.sub_add_cancel h] at h0
+  have hlast : (nurseryRun t).getLast? = some t := by
+    have h0 := nurseryRun_getLast (t - 1)
+    rwa [Nat.sub_add_cancel h] at h0
+  show t ∈ nurseryTick (nurseryRun t) (t + 1)
+  unfold nurseryTick
+  by_cases hc : ((nurseryRun t) ++ [t + 1]).length > {NURSERY_CAPACITY}
+  · rw [if_pos hc]
+    have hlen : 2 ≤ (nurseryRun t).length := by
+      have h1 : ((nurseryRun t) ++ [t + 1]).length
+          = (nurseryRun t).length + 1 := by simp
+      omega
+    obtain ⟨ys, hys⟩ := List.getLast?_eq_some_iff.mp hlast
+    have hysne : ys ≠ [] := by
+      intro h0
+      rw [h0] at hys
+      rw [hys] at hlen
+      simp at hlen
+    rw [hys, drop_one_append (ys ++ [t]) (t + 1) (by simp),
+      drop_one_append ys t hysne]
+    simp
+  · rw [if_neg hc]
+    exact List.mem_append.mpr (Or.inl hbirth)
+
+theorem nodup_snoc (l : List Nat) (t : Nat) :
+    l.Nodup → t ∉ l → (l ++ [t]).Nodup := by
+  induction l with
+  | nil => intro _ _; simp
+  | cons a r ih =>
+      intro hnod ht
+      show (a :: (r ++ [t])).Nodup
+      rw [List.nodup_cons] at hnod ⊢
+      refine ⟨?_, ih hnod.2 (fun hm => ht (List.mem_cons_of_mem a hm))⟩
+      intro hm
+      rw [List.mem_append] at hm
+      rcases hm with h1 | h1
+      · exact hnod.1 h1
+      · have hat : a = t := by simpa using h1
+        exact ht (by rw [← hat]; exact List.mem_cons_self)
+
+theorem nursery_runs_distinct : ∀ t : Nat, (nurseryRun t).Nodup := by
+  intro t
+  induction t with
+  | zero => simp [nurseryRun]
+  | succ k ih =>
+      have hd : k + 1 ∉ nurseryRun k := by
+        intro hm
+        have := nurseryRun_le k (k + 1) hm
+        omega
+      have hnod : ((nurseryRun k) ++ [k + 1]).Nodup := nodup_snoc _ _ ih hd
+      show (nurseryTick (nurseryRun k) (k + 1)).Nodup
+      unfold nurseryTick
+      by_cases hc : ((nurseryRun k) ++ [k + 1]).length > {NURSERY_CAPACITY}
+      · rw [if_pos hc]
+        exact List.Nodup.sublist (List.drop_sublist 1 _) hnod
+      · rw [if_neg hc]
+        exact hnod
+
+theorem nursery_promote_resident : ∀ (l : List Nat) (id : Nat),
+    id ∉ l → promote l id = l := by
+  intro l
+  induction l with
+  | nil => intro id _; rfl
+  | cons a r ih =>
+      intro id hid
+      have ha : ¬ (a = id) := by
+        intro hEq
+        exact hid (by rw [← hEq]; exact List.mem_cons_self)
+      have hr : id ∉ r := fun hm => hid (List.mem_cons_of_mem a hm)
+      show (if a = id then promote r id else a :: promote r id) = a :: r
+      rw [if_neg ha, ih id hr]
+
+theorem promote_not_mem : ∀ (l : List Nat) (id : Nat), id ∉ promote l id := by
+  intro l
+  induction l with
+  | nil => intro id; simp [promote]
+  | cons a r ih =>
+      intro id
+      show id ∉ (if a = id then promote r id else a :: promote r id)
+      by_cases ha : a = id
+      · rw [if_pos ha]
+        exact ih id
+      · rw [if_neg ha]
+        intro hm
+        rcases List.mem_cons.mp hm with h1 | h1
+        · exact ha h1.symm
+        · exact ih id h1
+
+/-- Replay the nursery from an arbitrary state, with the next birth at
+tick `next` (the organ's state right after a promotion at tick next-1). -/
+def nurseryContinue (l : List Nat) (next : Nat) : Nat → List Nat
+  | 0 => l
+  | k + 1 => nurseryTick (nurseryContinue l next k) (next + k)
+
+/-- An id below the next birth tick and absent from the current state is
+never reborn: births are fresh and eviction only drops. -/
+theorem nurseryContinue_far {{l : List Nat}} {{next id : Nat}}
+    (hlt : id < next) (hnot : id ∉ l) :
+    ∀ u : Nat, id ∉ nurseryContinue l next u := by
+  intro u
+  induction u with
+  | zero => simpa [nurseryContinue] using hnot
+  | succ k ih =>
+      intro hm
+      rcases nurseryTick_mem hm with h1 | h1
+      · exact ih h1
+      · omega
+
+theorem nursery_promote_once : ∀ (t id : Nat), id ∈ nurseryRun t →
+    ∀ u : Nat, id ∉ nurseryContinue (promote (nurseryRun t) id) (t + 1) u := by
+  intro t id hmem u
+  have hle : id ≤ t := nurseryRun_le t id hmem
+  exact nurseryContinue_far (by omega) (promote_not_mem (nurseryRun t) id) u
+
+/-- INV-PROMOTE-ONCE: promoting an id out of a distinct-id state and
+replaying the run, a second promotion of the same id is the identity. -/
+theorem nursery_promote_twice : ∀ (t id : Nat), id ∈ nurseryRun t →
+    ∀ u : Nat,
+      promote (nurseryContinue (promote (nurseryRun t) id) (t + 1) u) id
+        = nurseryContinue (promote (nurseryRun t) id) (t + 1) u := by
+  intro t id hmem u
+  exact nursery_promote_resident _ _ (nursery_promote_once t id hmem u)
+"""
+
+
+MAT_INDEX = f"""
 /-- One mat tick: birth appended, head recycled at the current epoch,
 then an eviction iff the board exceeds capacity {MAT_CAPACITY}. -/
 def revTop (l : List Nat) (t : Nat) : List Nat :=
@@ -854,6 +1227,8 @@ def main() -> None:
         STEP_LEMMAS,
         MASTERS,
         PAYLOADS,
+        NURSERY,
+        MAT_INDEX,
     ]
     print("\n".join(parts).rstrip() + "\n")
 

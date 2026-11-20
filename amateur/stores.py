@@ -70,8 +70,10 @@ class MultiLayerMat(ABC):
     @abstractmethod
     def birth_crystals(self, crystals: EmergentCrystals) -> None:
         """Flow #18: the loop's emergent crystal enters the nursery as a
-        candidate layer (round-10 PROVISIONAL reading; the crystal lexicon
-        and this payload shape await adjudication)."""
+        candidate (adjudicated round 11: `EmergentCrystalBody` is the
+        candidate kind, in its own D2 index; it is not a `MatOverlay`
+        status and it may carry a shadow-scored patch but never a live
+        one)."""
 
     @abstractmethod
     def lay_overlays(self, overlays: RatchetedOverlays) -> None:

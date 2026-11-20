@@ -1,80 +1,82 @@
-"""Phase 4-5b: executor wiring tests (PhysicsSource + PhysicsRun).
+"""Round 11 wave 3: the LeWM physics run through the ledger executor.
 
-Pins the Q1-Q4 binding contract at the executor boundary:
+Pins ``docs/round11-contract.md`` §3.5/§5 at the executor boundary.  The
+numbers quoted in the assertions are **measured this round** and kept as
+regression fingerprints; no round 7-9a measurement is re-asserted.
+
+What is pinned here:
 
 * ``DryRun()`` defaults to the explicit ``SyntheticSource`` plumbing
-  sentinel; ``PhysicsRun`` constructs a ``PhysicsSource`` (Q2).
-* The coverage ledger is plain data covering every non-read flow; derived
-  flows produce a non-None exact-type body, placeholders are ``None`` in
-  the executor's derived envelope, and an absent fid asserts rather than
-  falling back (no silent mint fallback).
-* A source failure is an assertion in the derivation pass, never a channel
-  charge.
-* The D2 patch table is substance-accounted: the Round 9a capacity bound
-  stores a rank-26 low-rank head.2 patch (5,056 params / 20,224 B) on the
-  single-stream fit, the dense full-predictor request (210,920 params) is
-  refused by the evidence budget *before* any fit or overlay, an
-  over-ceiling synthetic patch is still refused in the derivation pass,
-  record+patch eviction is atomic, and a resident record with no patch
-  asserts.
-* The #22 gate body is the source's derived output (not a literal in
-  ``_derive``).  The gate is real: it consumes cumulative adapted-vs-base
-  evidence that the organ records on applied ticks and publishes after
-  ``stale_patience`` observations.  Round 9a changed the measured regime:
-  the registered trace's patch now *passes* pre-adoption validation, so its
-  cumulative evidence is beneficial and the gate really passes on 11 ticks
-  (measuring 0.0245..0.0626 confidence) while the overlay is active, then
-  blocks again once the overlay is evicted.  Those 11 sediments are the
-  gate's own derived output, with no test double.  D4 retention is proven
-  non-vacuously: the retained prefix is byte-identical and object-identical
-  across the rest of the 36-tick scenario; every later sediment is an
-  append.  The identity ``B: 1 = 1 + 0 + 0`` still holds on the
-  zero-confidence path (25 consumed no-ops).
-* Q1 atomicity: the outer byte ceilings remain storage bounds, so a
-  synthetic over-ceiling patch is still refused in the derivation pass,
-  before any arrival/commit, leaving the store, D4 and the organ clean.
-  The Round 9a evidence bound is applied earlier (at fit time), so a
-  ``patch="full"`` request never produces an overlay at all.
-* P6 reset is explicit: two consecutive ``acceptance()`` calls (and two
-  consecutive ``run()`` calls) on one runner produce identical traces.
-* The single-stream acceptance reports the measured pre/post surprise
-  honestly.  Round 9a's validation-gated candidate is born at tick 18 and
-  the registered trace still does **not** cross the acceptance criterion
-  over every active tick (measured 1.0461, improved from the pre-9a
-  1.2614); over the active *flipped* ticks only it measures 0.9666.  Both
-  numbers are reported; ``test_single_stream_surprise_drops`` stays an
-  explicit recorded failure on the registered metric, not weakened into
-  "no material harm".  The bank-fit positive result (0.8226x) is in
-  ``tests/test_physics_organ.py``.  The pre-adoption validation path is
-  pinned for both outcomes: a real birth (seed 7) and a real interference
-  rejection (seed 0).
-* Encoder bit-identity is asserted with ``torch.equal`` after the run.
+  sentinel; ``PhysicsRun`` constructs a ``PhysicsSource``.
+* The coverage ledger is **derived** from the executor's ledger constants:
+  10/16 non-read flows derived, 6/16 placeholders ``{1,2,4,5,9,13}``,
+  11/11 store reads executor-derived; the source's dispatch set *is* the
+  derived set, an absent fid asserts, and a source failure is an assertion
+  in the derivation pass -- never a channel charge.
+* ``#16`` is a real derived body: ``#16.error == #12.surprise`` and
+  ``#16.cost == ||#12.delta||_2`` exactly, same tick.
+* The registered seed-7 trace: immediate ``#18`` birth at the trigger tick,
+  out-of-sample shadow scoring, the ``#23`` survivor surfacing without a
+  ``qualified`` pre-filter, the ``#22`` gate refusing a harmful survivor
+  (measured, non-vacuously) and promoting only a qualified one, the tagged
+  ``#19`` deposit / destructive ``#27`` drain, and the D4 append-only
+  retained-content identity.
+* Both pre-registered gates are recomputed independently from the
+  ``RunTick`` rows and cross-checked against the summary: ADAPTATION is
+  strictly ``< 1.0`` over the flipped-phase shadow rows; ADMISSION is
+  ``== 0`` promoted-harmful.
+* Seed 0 is the rejection control.  Its measured outcome is reported
+  honestly: the registered trigger never fires under the fit-window guard,
+  so zero promotions is met **vacuously** and ADAPTATION has ``n = 0``.
+* The single-stream regime cannot reach ``#21`` -> ``#24`` (no motif cohort:
+  ``MOTIF_MIN_PERSISTENCE`` is bank-derived and is *not* tuned), so the full
+  live-overlay lifecycle is exercised on the executor with a deposited
+  motif-cohort fixture, clearly labelled as a wiring test.
+* The reject-with-charge identity works on the ``#22`` channel; the Q4
+  zero-confidence write is a consumed no-op with identity B; the D2 byte
+  ceilings fail closed in the derivation pass; the encoder stays
+  bit-identical throughout.
 
-Runtime: ~12 s on 8 CPU threads (checkpoint load plus the repeated
-36-tick scenario runs and their fits).
+Runtime: ~25 s (checkpoint load plus the 36-tick scenarios, their fits and
+the lifecycle fixture).
 """
 from __future__ import annotations
 
 import os
-import pickle
 import unittest
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from amateur.dryrun import DryRun, PLACEHOLDER_FLOWS
+from amateur.dryrun import PLACEHOLDER_FLOWS, DryRun
 from amateur.payloads import (
-    MAX_PATCH_BYTES,
     MAX_PATCH_TOTAL_BYTES,
     NON_READ_FLOWS,
-    REAL_BODIES,
-    BiasPrimitive,
-    MatOverlay,
     PAYLOAD_SCHEMA,
+    BiasPrimitive,
+    DebrisCohort,
+    DigestedDebrisBody,
+    MatOverlay,
 )
-from amateur.physics.organ import PhysicsOrgan
-from amateur.physics.run import PhysicsRun, PhysicsSource
+from amateur.physics.organ import (
+    MOTIF_MIN_PERSISTENCE,
+    NURSERY_CAPACITY,
+    RESIDENCE_N,
+)
+from amateur.physics.run import (
+    ADAPTATION_GATE,
+    ADMISSION_GATE,
+    CONTROL_SEED,
+    DERIVED_FLOWS,
+    REGISTERED_SEED,
+    STORE_READ_FLOWS,
+    TOTAL_TICKS,
+    PhysicsRun,
+    PhysicsSource,
+    coverage_ledger,
+)
+from amateur.provenance import Provenance
 
 REPO = Path(__file__).resolve().parents[1]
 CHECKPOINT = REPO / ".work" / "forge" / "checkpoint.pt"
@@ -91,768 +93,803 @@ def setUpModule() -> None:
     torch.set_num_threads(min(8, os.cpu_count() or 1))
 
 
-def make_run(seed: int = 7, **kwargs: object) -> PhysicsRun:
-    return PhysicsRun(seed=seed, **kwargs)  # type: ignore[arg-type]
+# ---------------------------------------------------------------------------
+# Scenario cache: two measured runs shared by every read-only assertion.
+# ---------------------------------------------------------------------------
+_RUNS: dict[int, tuple[PhysicsRun, object]] = {}
 
 
-PROPOSAL_TICK = 16
-BIRTH_TICK = 18
+def scenario(seed: int):
+    """The measured ``(run, result)`` for one seed (computed once)."""
+    if seed not in _RUNS:
+        run = PhysicsRun(seed=seed)
+        _RUNS[seed] = (run, run.scenario(seed=seed))
+    return _RUNS[seed]
 
 
-def _drive_to_proposal(run: PhysicsRun) -> None:
-    """Drive normal -> flip up to the registered proposal tick (16)."""
-    for index in range(1, PROPOSAL_TICK + 1):
-        if index == 8:
-            run.flip_gravity()
-        run.tick()
+def _emissions_by_tick(run: PhysicsRun) -> dict[int, dict[int, object]]:
+    """``tick -> fid -> envelope`` from the executor's own emission log."""
+    found: dict[int, dict[int, object]] = {}
+    for tick, fid, envelope in run.dry.emissions:
+        found.setdefault(int(tick), {})[int(fid)] = envelope
+    return found
 
 
-def _drive_to_birth(run: PhysicsRun) -> None:
-    """Drive up to and including the registered birth tick (18)."""
-    row = None
-    for index in range(1, BIRTH_TICK + 1):
-        if index == 8:
-            run.flip_gravity()
-        row = run.tick()
-    assert row is not None and row.adopted is not None, (
-        "the registered birth did not fire; the scenario changed"
+def _adaptation_from_rows(rows) -> tuple[int, float]:
+    """ADAPTATION recomputed independently from the rows (contract §5)."""
+    selected = [
+        row
+        for row in rows
+        if row.phase == "flipped" and row.shadow_ratio is not None
+    ]
+    if not selected:
+        return 0, float("nan")
+    return (
+        len(selected),
+        sum(float(row.shadow_ratio) for row in selected) / len(selected),
     )
 
 
-class _OversizedPatch:
-    """A synthetic patch over the per-patch ceiling (storage bound only).
+def _admission_from_rows(rows) -> tuple[int, list[tuple[str, float]]]:
+    """ADMISSION recomputed independently from the rows (contract §5).
 
-    Round 9a applies the evidence bound at fit time, so no admissible fit
-    can produce an over-ceiling patch; the outer ``MatBoard`` byte ceiling
-    is still enforced as a storage bound and is exercised with this
-    explicitly synthetic object.
+    A promotion row carries the candidate's final residence ratio, so the
+    gate can be recomputed from the trace alone: promoted candidates whose
+    final ``ratio >= 1.0``.
     """
-
-    def __init__(self, overlay_id: str, *, nbytes: int = MAX_PATCH_BYTES + 1) -> None:
-        self.overlay_id = overlay_id
-        self._nbytes = int(nbytes)
-        self.param_count = self._nbytes // 4
-
-    @property
-    def nbytes(self) -> int:
-        return self._nbytes
+    promoted = [
+        (str(row.promoted_id), float(row.candidate_ratio))
+        for row in rows
+        if row.promoted_id is not None
+    ]
+    harmful = [item for item in promoted if not item[1] < 1.0]
+    return len(harmful), harmful
 
 
-def _body_type(fid: int) -> type:
-    # Round 10: #18 is the D2 birth (candidate overlay); #23/#24 remain the
-    # surviving-crystal read and the ratchet write.  REAL_BODIES still lists
-    # #18's old EmergentCrystalBody body for the historical record.
-    if fid in (18, 23, 24):
-        return MatOverlay
-    if fid in REAL_BODIES:
-        return REAL_BODIES[fid]
-    if fid == 22:
-        return BiasPrimitive
-    raise AssertionError(f"no body type for #{fid}")
-
-
-# ---------------------------------------------------------------------------
-# Source selection and coverage ledger
-# ---------------------------------------------------------------------------
 class TestSourceSelection(unittest.TestCase):
     def test_dryrun_default_is_the_synthetic_sentinel(self) -> None:
-        dry = DryRun()
-        self.assertIsInstance(dry.source, type(dry.source))
-        self.assertEqual(dry.source.mode, "synthetic")
-        self.assertEqual(
-            set(dry.source.coverage), set(NON_READ_FLOWS)
+        self.assertEqual(DryRun().source.mode, "synthetic")
+        self.assertTrue(DryRun().source.coverage)
+        self.assertTrue(
+            all(value == "synthetic" for value in DryRun().source.coverage.values())
         )
-        self.assertEqual(set(dry.source.coverage.values()), {"synthetic"})
 
     @requires_artifacts
     def test_physics_run_source_is_physics(self) -> None:
-        run = make_run()
-        self.assertIsInstance(run.source, PhysicsSource)
+        run = PhysicsRun(seed=REGISTERED_SEED)
         self.assertEqual(run.source.mode, "physics")
+        self.assertIsInstance(run.source, PhysicsSource)
+        self.assertEqual(run.seed, REGISTERED_SEED)
 
 
-@requires_artifacts
 class TestCoverageLedger(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = make_run()
-        cls.runner.tick()
+    """Contract §2.7: the coverage account is derived from the ledger."""
 
-    def test_ledger_covers_every_non_read_flow(self) -> None:
-        coverage = self.runner.source.coverage
-        self.assertEqual(set(coverage), set(NON_READ_FLOWS))
-        self.assertLessEqual(set(coverage.values()), {"derived", "placeholder"})
-        placeholders = {fid for fid, mode in coverage.items() if mode == "placeholder"}
-        derived = {fid for fid, mode in coverage.items() if mode == "derived"}
-        self.assertEqual(placeholders, PLACEHOLDER_FLOWS)
-        self.assertEqual(derived, set(NON_READ_FLOWS) - PLACEHOLDER_FLOWS)
+    def test_arithmetic_is_derived_from_the_ledger(self) -> None:
+        account = coverage_ledger()
+        self.assertEqual(account["n_non_read"], 16)
+        self.assertEqual(account["n_derived"], 10)
+        self.assertEqual(account["n_placeholders"], 6)
+        self.assertEqual(account["n_store_reads"], 11)
+        self.assertEqual(
+            account["n_derived"] + account["n_placeholders"],
+            account["n_non_read"],
+        )
+        self.assertEqual(
+            account["placeholders"], (1, 2, 4, 5, 9, 13)
+        )
+        self.assertEqual(account["placeholders"], tuple(sorted(PLACEHOLDER_FLOWS)))
+        self.assertEqual(
+            frozenset(account["derived"]), frozenset(NON_READ_FLOWS) - PLACEHOLDER_FLOWS
+        )
+        self.assertEqual(frozenset(account["store_reads"]), frozenset(STORE_READ_FLOWS))
+        # The two sets partition the 27-flow ledger.
+        self.assertEqual(
+            frozenset(account["non_read"]) | frozenset(account["store_reads"]),
+            frozenset(range(1, 28)),
+        )
 
-    def test_derived_claim_holds_for_every_derived_fid(self) -> None:
-        tick = self.runner.dry.tick_no
-        for fid, mode in self.runner.source.coverage.items():
-            if mode != "derived":
-                continue
-            body = self.runner.source.derive_body(
-                fid, tick, board=self.runner.board, debris=self.runner.dry.debris
+    @requires_artifacts
+    def test_source_dispatch_is_exactly_the_derived_set(self) -> None:
+        source = PhysicsRun(seed=REGISTERED_SEED).source
+        self.assertEqual(frozenset(source._derivers), frozenset(DERIVED_FLOWS))
+        account = coverage_ledger()
+        for fid, claim in source.coverage.items():
+            expected = (
+                "placeholder" if fid in account["placeholders"] else "derived"
             )
-            self.assertIsNotNone(body, msg=f"#{fid} derived but None")
-            self.assertIs(type(body), _body_type(fid), msg=f"#{fid}")
-            self.assertIn(type(body), PAYLOAD_SCHEMA[fid], msg=f"#{fid}")
+            self.assertEqual(claim, expected, msg=f"#{fid}")
+        self.assertEqual(len(source.read_coverage), 11)
+        self.assertTrue(
+            all(
+                claim == "store-read/executor-derived"
+                for claim in source.read_coverage.values()
+            )
+        )
 
+    @requires_artifacts
+    def test_derived_flows_carry_their_pinned_types(self) -> None:
+        run, _result = scenario(REGISTERED_SEED)
+        emissions = _emissions_by_tick(run)
+        self.assertTrue(emissions)
+        for fid in sorted(DERIVED_FLOWS):
+            seen = [
+                envelope
+                for tick in emissions
+                for body_fid, envelope in emissions[tick].items()
+                if body_fid == fid
+            ]
+            self.assertTrue(seen, msg=f"#{fid} never arrived")
+            for envelope in seen:
+                self.assertIn(type(envelope.body), PAYLOAD_SCHEMA[fid], msg=f"#{fid}")
+        # The always-real flows are never the None placeholder.
+        for fid in (3, 6, 10, 12, 16):
+            for tick in emissions:
+                self.assertIsNotNone(emissions[tick][fid].body, msg=f"#{fid}@{tick}")
+        # The no-op write channels carry their exact-type sentinels, never None.
+        for fid in (18, 19, 22, 24):
+            for tick in emissions:
+                self.assertIsNotNone(emissions[tick][fid].body, msg=f"#{fid}@{tick}")
+
+    @requires_artifacts
     def test_placeholder_envelopes_are_none(self) -> None:
-        for fid in PLACEHOLDER_FLOWS:
-            self.assertIsNone(
-                self.runner.dry.derived[fid].body, msg=f"#{fid} placeholder not None"
-            )
+        run, _result = scenario(REGISTERED_SEED)
+        emissions = _emissions_by_tick(run)
+        for fid in sorted(PLACEHOLDER_FLOWS):
+            for tick in emissions:
+                self.assertIsNone(emissions[tick][fid].body, msg=f"#{fid}@{tick}")
 
+    @requires_artifacts
     def test_absent_fid_asserts_and_never_falls_back(self) -> None:
+        run = PhysicsRun(seed=REGISTERED_SEED)
+        run.reset()
         with self.assertRaises(AssertionError):
-            self.runner.source.derive_body(
-                99, 1, board=self.runner.board, debris=self.runner.dry.debris
-            )
-        # A placeholder fid is not in the derived dispatch either.
-        for fid in PLACEHOLDER_FLOWS:
-            with self.assertRaises(AssertionError):
-                self.runner.source.derive_body(
-                    fid, 1, board=self.runner.board, debris=self.runner.dry.debris
-                )
-
-    def test_source_without_context_asserts(self) -> None:
-        source = PhysicsSource(self.runner.organ)
+            run.source.derive_body(99, 1, board=run.board, debris=run.dry.debris)
+        # A source with no bound context refuses to invent a body either.
+        fresh = PhysicsSource(run.organ)
         with self.assertRaises(AssertionError):
-            source.derive_body(6, 1, board=self.runner.board, debris=self.runner.dry.debris)
+            fresh.derive_body(12, 1, board=run.board, debris=run.dry.debris)
 
 
 class TestSourceFailureIsNotACharge(unittest.TestCase):
     class _ExplodingSource:
-        mode = "synthetic"
-        coverage = {1: "synthetic", 22: "synthetic"}
+        mode = "physics"
 
-        def derive_body(self, fid: int, tick: int, *, board: object, debris: object) -> object:
-            raise AssertionError(f"cannot derive #{fid}")
+        def __init__(self) -> None:
+            self.coverage = {fid: "synthetic" for fid in sorted(NON_READ_FLOWS)}
 
-        def on_commit(self, fid: int, envelope: object, *, board: object, debris: object) -> None:
-            return None
+        def derive_body(self, fid, tick, *, board, debris):  # noqa: ANN001
+            raise RuntimeError("derivation failed")
+
+        def on_commit(self, fid, envelope, *, board, debris):  # noqa: ANN001
+            raise AssertionError("on_commit must not be reached")
 
     def test_failure_raises_before_any_arrival(self) -> None:
         dry = DryRun(source=self._ExplodingSource())
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             dry.tick()
         self.assertEqual(sum(dry.attempted.values()), 0)
         self.assertEqual(sum(dry.accepted.values()), 0)
         self.assertEqual(sum(dry.refused.values()), 0)
-        self.assertEqual(sum(dry.missed.values()), 0)
-        self.assertEqual(sum(dry.consumed.values()), 0)
+        self.assertEqual(dry.emissions, [])
+        # A failure is not a charge: no mailbox, D2 (beyond the seed record)
+        # or D3 state was touched.
+        self.assertEqual(dry.board.resident_ids(), frozenset({"ovr-0"}))
+        self.assertEqual(len(dry.debris), 0)
 
 
-# ---------------------------------------------------------------------------
-# #22 gate and no-op semantics
-# ---------------------------------------------------------------------------
 @requires_artifacts
-class TestZeroConfidenceGate(unittest.TestCase):
-    """Q4 + Round 9a: the #22 gate is real in *both* directions.
-
-    Round 8 measured only the blocked branch (the dense patch was harmful).
-    Round 9a's capacity-bounded patch passes pre-adoption validation, so the
-    gate really passes on the active ticks and really blocks once the
-    overlay is gone.  No test double is used anywhere below.
-    """
+class TestCostErrorIdentity(unittest.TestCase):
+    """Contract §2.6: ``#16`` is a real derived body, not a dressed constant."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.runner = make_run(seed=7)
-        cls.result = cls.runner.acceptance()
+        cls.runner, cls.result = scenario(REGISTERED_SEED)
+        cls.emissions = _emissions_by_tick(cls.runner)
 
-    def test_d4_sediments_are_the_real_gate_output(self) -> None:
-        """The registered trace passes the gate on 11 witnessed ticks."""
-        summary = self.result.summary
-        self.assertEqual(summary["d4_sediments"], 11)
-        self.assertFalse(summary["d4_byte_identical"])
-        self.assertEqual(len(self.runner.board.d4), 11)
-        for body in self.runner.board.d4:
-            self.assertIs(type(body), BiasPrimitive)
-            self.assertEqual(body.bias_primitive, "ratchet-gate-passed")
-            self.assertGreater(body.confidence, 0.0)
-            self.assertLessEqual(body.confidence, 1.0)
-        stages = []
-        previous = 0
-        for row in self.result.ticks:
-            if row.d4_size > previous:
-                stages.append(row.frame_tick)
-            previous = row.d4_size
-        # Sediments appear only once the window has 2 applied ticks (19, 20
-        # -> first publication at 21) and stop when the overlay goes stale.
-        self.assertEqual(stages, [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31])
+    def test_error_equals_surprise_and_cost_equals_the_delta_norm(self) -> None:
+        checked = 0
+        for tick, envelopes in self.emissions.items():
+            sixteen = envelopes[16]
+            twelve = envelopes[12]
+            self.assertEqual(sixteen.provenance.tick_born, twelve.provenance.tick_born)
+            self.assertEqual(sixteen.body.error, twelve.body.surprise, msg=f"t{tick}")
+            norm = float(
+                np.linalg.norm(np.asarray(twelve.body.delta, dtype=np.float64))
+            )
+            self.assertEqual(sixteen.body.cost, norm, msg=f"t{tick}")
+            # The same tick's #12 delta is the vector #16's cost was taken of.
+            self.assertEqual(len(twelve.body.delta), 64)
+            checked += 1
+        self.assertEqual(checked, TOTAL_TICKS)
 
-    def test_zero_confidence_write_is_a_consumed_noop_identity_b(self) -> None:
-        summary = self.result.summary
-        ticks = len(self.result.ticks)
-        self.assertEqual(summary["accepted_22"], ticks)
-        self.assertEqual(summary["consumed_22"], ticks)
-        self.assertEqual(summary["refused_22"], 0)
-        self.assertEqual(summary["sink_depth_22"], 0)
-        self.assertEqual(summary["zero_confidence_writes"], ticks - summary["d4_sediments"])
-        self.assertEqual(summary["zero_confidence_writes"], 25)
-        # 25 consumed no-ops + 11 real sediments = 36 settled writes.
-        self.assertEqual(summary["zero_confidence_writes"] + summary["d4_sediments"], ticks)
-        self.assertEqual(
-            summary["accepted_22"],
-            summary["consumed_22"] + summary["sink_depth_22"] + 0,
-        )
-
-    def test_gate_body_is_the_derived_output(self) -> None:
-        body = self.runner.dry.derived[22].body
-        self.assertIs(type(body), BiasPrimitive)
-        # After the eviction there is no active overlay: blocked again.
-        self.assertEqual(
-            (body.bias_primitive, body.confidence),
-            ("ratchet-gate-blocked", 0.0),
-        )
-        self.assertEqual(self.runner.organ.ratchet_gate_passed(), (False, 0.0))
-        self.assertIsNone(self.runner.organ._gate_evidence)
-
-    def test_gate_blocked_without_evidence(self) -> None:
-        run = make_run(seed=7)
-        run.tick()
-        self.assertEqual(run.organ.ratchet_gate_passed(), (False, 0.0))
-        self.assertEqual(
-            (run.dry.derived[22].body.bias_primitive,
-             run.dry.derived[22].body.confidence),
-            ("ratchet-gate-blocked", 0.0),
-        )
-        self.assertEqual(run.board.d4, [])
-
-    def test_gate_blocked_with_evidence_but_no_active_overlay(self) -> None:
-        run = make_run(seed=7)
-        run.organ._record_gate_evidence(0.2, 0.4)  # beneficial verdict, no overlay
-        run.tick()
-        self.assertEqual(run.organ.ratchet_gate_passed(), (False, 0.0))
-        self.assertEqual(run.dry.derived[22].body.bias_primitive,
-                         "ratchet-gate-blocked")
-        self.assertEqual(run.board.d4, [])
-
-    def test_gate_passes_on_published_beneficial_evidence(self) -> None:
-        """The passing branch through a real tick, exercised by evidence.
-
-        The birth fires at the registered tick; ``flush`` makes the next
-        tick's derivation the only decision point, so the injected verdict
-        survives to the gate.  This isolates the passing branch from the
-        validation machinery; the *real* passing branch is measured in
-        ``test_d4_sediments_are_the_real_gate_output`` above.
-        """
-        run = make_run(seed=7)
-        _drive_to_birth(run)
-        self.assertEqual(run.board.d4, [])
-        run.organ.flush()
-        run.organ._record_gate_evidence(0.2, 0.4)
-        row = run.tick()
-        self.assertEqual(row.tick, 19)
-        body = run.dry.derived[22].body
-        self.assertIs(type(body), BiasPrimitive)
-        self.assertEqual(body.bias_primitive, "ratchet-gate-passed")
-        self.assertGreater(body.confidence, 0.0)
-        self.assertEqual(body.confidence, 0.5)
-        self.assertEqual(len(run.board.d4), 1)
-        self.assertIs(run.board.d4[0], body)
-
-    def test_gate_blocked_on_harmful_evidence(self) -> None:
-        run = make_run(seed=7)
-        _drive_to_birth(run)
-        run.organ.flush()
-        run.organ._record_gate_evidence(0.4, 0.2)  # adapted worse than base
-        run.tick()
-        self.assertEqual(run.organ.ratchet_gate_passed(), (False, 0.0))
-        self.assertEqual(run.dry.derived[22].body.bias_primitive,
-                         "ratchet-gate-blocked")
-        self.assertEqual(run.board.d4, [])
-
-    def test_retained_invariant_survives_the_scenario(self) -> None:
-        """Non-vacuous Q4 retention across the remaining flip scenario.
-
-        The first real sediment (tick 21) is snapshotted while D4 is
-        non-empty; the scenario then continues to tick 36 (flip back at 28,
-        recover).  The retained prefix must stay byte-identical *and* be the
-        same object, and every later write must be an append.  Every tick
-        still settles exactly one #22 event (identity B).
-        """
-        run = make_run(seed=7)
-        run.reset()
-        run._flip_at = 8
-        run._flip_back_at = 28
-        retained = None
-        retained_body = None
-        for index in range(1, 37):
-            if index in (8, 28):
-                run.flip_gravity()
-            row = run.tick()
-            # Identity B on every tick: 1 accepted = 1 consumed + 0 residue.
-            self.assertEqual(run.dry.accepted[22], index, msg=f"tick {index}")
-            self.assertEqual(run.dry.consumed[22], index, msg=f"tick {index}")
-            self.assertEqual(run.dry.refused[22], 0, msg=f"tick {index}")
-            self.assertEqual(len(run.dry.mailboxes[22]), 0, msg=f"tick {index}")
-            if retained is None and len(run.board.d4) == 1:
-                retained = pickle.dumps(run.board.d4, protocol=4)
-                retained_body = run.board.d4[0]
-                self.assertEqual(row.frame_tick, 21)
-        self.assertIsNotNone(retained)
-        self.assertIsNotNone(retained_body)
-        # Non-vacuous: the retained prefix is still exactly what it was.
-        self.assertEqual(pickle.dumps(run.board.d4[:1], protocol=4), retained)
-        self.assertIs(run.board.d4[0], retained_body)
-        self.assertAlmostEqual(retained_body.confidence, 0.024529555468589148, places=12)
-        self.assertEqual(len(run.board.d4), 11)
-        self.assertEqual(
-            [row.phase for row in run.ticks[-1:]], ["recovered"]
-        )
+    def test_the_cost_is_measured_not_a_constant(self) -> None:
+        costs = {
+            float(self.emissions[tick][16].body.cost) for tick in self.emissions
+        }
+        errors = {
+            float(self.emissions[tick][16].body.error) for tick in self.emissions
+        }
+        self.assertGreater(len(costs), 10)
+        self.assertGreater(len(errors), 10)
+        self.assertGreater(max(costs), 0.0)
 
 
-# ---------------------------------------------------------------------------
-# D2 patch accounting through the executor
-# ---------------------------------------------------------------------------
 @requires_artifacts
-class TestPatchAccounting(unittest.TestCase):
+class TestRegisteredScenario(unittest.TestCase):
+    """The pre-registered seed-7 trace (§5), measured this round."""
+
     @classmethod
     def setUpClass(cls) -> None:
-        cls.runner = make_run(seed=7)
-        cls.result = cls.runner.acceptance()
+        cls.runner, cls.result = scenario(REGISTERED_SEED)
+        cls.rows = cls.result.ticks
+        cls.summary = cls.result.summary
 
-    def test_head_patch_attached_and_then_removed_atomically(self) -> None:
-        """Round 9a: the stored patch is the rank-26 low-rank head.2 delta."""
-        summary = self.result.summary
-        self.assertEqual(summary["fit_patch"], "head")
-        self.assertEqual(summary["fit_rank"], 26)
-        self.assertEqual(summary["fit_param_count"], 5_056)   # 192*26 + 64
-        self.assertEqual(summary["fit_nbytes"], 20_224)       # 4 * 5056
-        self.assertEqual(summary["fit_budget_n"], 16)
-        self.assertEqual(summary["fit_budget_capacity"], 5_120.0)
-        self.assertEqual(summary["fit_reason"], "")
-        self.assertLessEqual(summary["max_patch_bytes_seen"], MAX_PATCH_BYTES)
-        row = next(row for row in self.result.ticks if row.patch_bytes)
-        self.assertIn("ovr-01", row.residents)
-        self.assertEqual(row.patch_bytes, 20_224)
-        # The eviction tick removes the record and the patch together.
-        eviction = next(row for row in self.result.ticks if row.evicted)
-        self.assertNotIn(eviction.evicted[0], eviction.residents)
-        self.assertEqual(eviction.patch_bytes, 0)
-        self.assertEqual(summary["residents_end"], ())
-        self.assertEqual(summary["patches_end"], ())
-        self.assertEqual(self.runner.board.patches(), ())
+    def test_scenario_shape_and_spike(self) -> None:
+        scenario_ = self.summary["scenario"]
+        self.assertEqual(scenario_["seed"], REGISTERED_SEED)
+        self.assertEqual(scenario_["ticks"], TOTAL_TICKS)
+        self.assertEqual((scenario_["flip_at"], scenario_["flip_back_at"]), (8, 28))
+        self.assertEqual(len(self.rows), TOTAL_TICKS)
+        self.assertEqual(
+            [row.tick for row in self.rows], list(range(1, TOTAL_TICKS + 1))
+        )
+        self.assertEqual(
+            {row.phase for row in self.rows}, {"normal", "flipped", "recovered"}
+        )
+        self.assertGreater(self.summary["spike_peak"], self.summary["normal_mean"])
+        self.assertGreater(
+            self.summary["spike_peak"] / self.summary["normal_mean"], 3.0
+        )
 
-    def test_no_orphan_patch_or_record_at_any_tick(self) -> None:
-        for row in self.result.ticks:
-            if row.residents:
-                self.assertEqual(row.patch_bytes, 20_224, msg=f"tick {row.tick}")
-            else:
-                self.assertEqual(row.patch_bytes, 0, msg=f"tick {row.tick}")
+    def test_candidate_is_born_at_the_trigger_tick(self) -> None:
+        """Immediate birth at the first spike past the registered fit window."""
+        self.assertEqual(self.summary["lifecycle"]["candidate_birth"], 19)
+        curve = self.summary["residence_curve"]
+        self.assertEqual(len(curve), 9)  # t19 (birth) .. t27
+        self.assertEqual([row["residence_ticks"] for row in curve], list(range(0, 9)))
+        self.assertEqual([row["tick"] for row in curve], list(range(19, 28)))
+        self.assertTrue(all(row["phase"] == "flipped" for row in curve))
+        # The curve's cumulative ratio is monotonically non-decreasing here
+        # (measured) and crosses below 1.0 only on the last resident tick.
+        ratios = [row["ratio"] for row in curve if row["residence_ticks"] > 0]
+        self.assertEqual(len(ratios), 8)
+        self.assertEqual(
+            [round(ratio, 6) for ratio in ratios],
+            [
+                1.184592,
+                1.113826,
+                1.007115,
+                1.009547,
+                1.023553,
+                1.019522,
+                1.002973,
+                0.999225,
+            ],
+        )
+        self.assertTrue(all(row["qualified"] is False for row in curve[:-1]))
+        self.assertTrue(curve[-1]["qualified"])
 
-    def test_byte_ceilings(self) -> None:
-        self.assertLessEqual(MAX_PATCH_BYTES, 262_144)
-        self.assertEqual(MAX_PATCH_TOTAL_BYTES, 4 * MAX_PATCH_BYTES)
-        self.assertLessEqual(self.runner.board.patch_bytes(), MAX_PATCH_TOTAL_BYTES)
-
-    def test_resident_without_patch_asserts(self) -> None:
-        from amateur.payloads import MatBoard
-
-        board = MatBoard(seed=False)
-        board.birth(MatOverlay(1, "ovr-x", "active"))
-        with self.assertRaises(AssertionError):
-            board.assert_patch_bounds(require_complete=True)
-
-    @requires_artifacts
-    def test_missing_patch_on_commit_asserts(self) -> None:
-        run = make_run(seed=7)
-        run.tick()
-        # Round 10: the D2 birth commit is #18 (the candidate crystal).
-        run.board.birth(MatOverlay(9, "ghost", "candidate"))
-        from amateur.provenance import Envelope, Provenance
-
-        ghost = Envelope(Provenance(18, run.dry.tick_no),
-                         MatOverlay(1, "ghost", "candidate"))
-        with self.assertRaises(AssertionError):
-            run.source.on_commit(18, ghost, board=run.board, debris=run.dry.debris)
-
-
-# ---------------------------------------------------------------------------
-# Q1 atomicity: capacity refuses dense patches, ceilings refuse oversized ones
-# ---------------------------------------------------------------------------
-@requires_artifacts
-class TestFullPatchModeFailsClosed(unittest.TestCase):
-    def test_full_patch_is_refused_by_capacity_before_any_fit(self) -> None:
-        """The dense full-predictor request never reaches a fit or an overlay.
-
-        Round 9a: ``patch="full"`` is 210,920 stored parameters, far over
-        the evidence budget's admissible rank-ceilinged patch (5,056 params
-        from the same 16 transitions).  The refusal is recorded with the
-        budget and the scenario simply continues with no overlay -- there is
-        nothing to attach and nothing is half-committed.
-        """
-        organ = PhysicsOrgan(store_frames=True, fit_streams={0}, patch="full")
-        run = PhysicsRun(organ=organ, seed=7)
-        result = run.acceptance()
-        summary = result.summary
-        self.assertIsNone(summary["decision"])
-        self.assertIsNone(summary["adoption_tick"])
-        self.assertEqual(summary["active_ticks"], 0)
-        self.assertEqual(summary["fit_reason"], "capacity")
-        self.assertEqual(summary["fit_param_count"], 0)
-        self.assertEqual(organ.fit_history[-1].requested_params, 210_920)
-        self.assertEqual(organ.refusals[-1]["reason"], "capacity")
-        self.assertEqual(organ.refusals[-1]["max_params"], 5_056)
-        self.assertEqual(organ.overlay_table.all_ids(), frozenset())
-        self.assertEqual(run.board.residents(), ())
-        self.assertEqual(run.board.patches(), ())
-        self.assertEqual(run.board.patch_bytes(), 0)
-        self.assertEqual(run.board.d4, [])
-        self.assertEqual(organ.fit_history[-1].reason, "capacity")
-
-    def test_oversized_synthetic_patch_fails_in_the_derivation_pass(self) -> None:
-        """The outer byte ceiling is a storage bound and still fails closed.
-
-        A synthetic patch larger than ``MAX_PATCH_BYTES`` is refused by the
-        #18 derivation (before any arrival, commit, or charge); the failing
-        tick leaves the store, D2 and the organ clean.
-        """
-        run = make_run(seed=7)
-        run.reset()
-        organ = run.organ
-        observation = organ.step(0)
-        digest = organ.digest(observation)
-        ratchet = organ.ratchet(digest)
-        oversized = _OversizedPatch("ovr-big")
-        organ.overlay_table.birth(oversized, motif_id="motif-big", tick=1)
-        record = organ.overlay_table.record("ovr-big")
+    def test_candidate_fit_is_capacity_bounded(self) -> None:
+        fit = self.summary["candidate_fit"]
+        self.assertTrue(fit["attempted"])
+        record = fit["record"]
+        self.assertIsNotNone(record)
         assert record is not None
-        run.source.begin_tick(
-            observation.frame, observation, digest, ratchet, adoption=record
+        self.assertEqual(record["rank"], 26)
+        self.assertEqual(record["param_count"], 5_056)
+        self.assertEqual(record["nbytes"], 20_224)
+        self.assertEqual(record["budget_n"], 16)
+        self.assertEqual(record["reason"], "")
+        self.assertLess(record["loss_after"], record["loss_before"])
+        self.assertLessEqual(
+            record["param_count"], int(record["budget_capacity"])
         )
-        self.assertEqual(run.board.residents(), ())
-        counters_before = (
-            dict(run.dry.attempted),
-            dict(run.dry.accepted),
-            dict(run.dry.refused),
-            dict(run.dry.consumed),
-            dict(run.dry.missed),
-        )
-        with self.assertRaises(AssertionError) as caught:
-            run.source._candidate(2, run.board)
-        message = str(caught.exception)
-        self.assertIn(f"{oversized.nbytes}", message)
-        self.assertIn("per-patch ceiling", message)
-        counters_after = (
-            dict(run.dry.attempted),
-            dict(run.dry.accepted),
-            dict(run.dry.refused),
-            dict(run.dry.consumed),
-            dict(run.dry.missed),
-        )
-        self.assertEqual(counters_after, counters_before)
-        self.assertGreater(oversized.nbytes, MAX_PATCH_BYTES)
-        self.assertEqual(run.board.patches(), ())
-        self.assertEqual(run.board.patch_bytes(), 0)
-        self.assertEqual(organ.overlay_table.all_ids(), frozenset())
-        self.assertEqual(organ.overlay_table.adapter("ovr-big"), None)
 
-    def test_low_rank_patch_path_still_attaches(self) -> None:
-        """The admissible low-rank patch (20,224 B) still commits and attaches."""
-        run = make_run(seed=7)
-        _drive_to_birth(run)
-        self.assertEqual(run.board.residents(), (("ovr-01", 1),))
-        patches = run.board.patches()
-        self.assertEqual(len(patches), 1)
-        self.assertEqual(patches[0][0], "ovr-01")
-        self.assertEqual(run.board.patch_bytes(), 20_224)
-        run.board.assert_patch_bounds(require_complete=True)
+    def test_shadow_evidence_is_out_of_sample_only(self) -> None:
+        """The first shadow row is the tick *after* the birth (in-sample excluded)."""
+        shadow_ticks = [
+            row.tick for row in self.rows if row.shadow_ratio is not None
+        ]
+        birth = self.summary["lifecycle"]["candidate_birth"]
+        assert birth is not None
+        self.assertNotIn(birth, shadow_ticks)
+        self.assertEqual(shadow_ticks, list(range(birth + 1, 28)))
+        self.assertEqual(len(shadow_ticks), 8)
+        # One shadow-scored resident candidate per row.
+        self.assertTrue(all(row.shadow_n == 1 for row in self.rows if row.shadow_ratio))
 
+    def test_store_survivor_reads_the_same_evidence_as_the_organ(self) -> None:
+        """#23 surfaces the lowest-ratio resident; the curve is that evidence."""
+        survivor_rows = [row for row in self.rows if row.survivor_id is not None]
+        self.assertEqual([row.tick for row in survivor_rows], [23, 24, 25, 26, 27])
+        for row in survivor_rows:
+            self.assertEqual(row.survivor_id, row.candidate_id)
+            self.assertEqual(row.survivor_ratio, row.candidate_ratio)
+            self.assertEqual(
+                row.survivor_qualified, row.candidate_ratio < 1.0
+            )
+        # The first surface is exactly the RESIDENCE_N-th out-of-sample sample.
+        first = survivor_rows[0]
+        self.assertEqual(first.candidate_residence_ticks, RESIDENCE_N)
+        self.assertEqual(self.summary["lifecycle"]["first_survivor"], 23)
 
-# ---------------------------------------------------------------------------
-# P6 reset: the registered acceptance is repeatable on one runner (C)
-# ---------------------------------------------------------------------------
-@requires_artifacts
-class TestResetRepeatability(unittest.TestCase):
-    def test_two_acceptance_calls_are_identical(self) -> None:
-        run = make_run(seed=7)
-        first = run.acceptance()
-        second = run.acceptance()
-        self.assertEqual(first.ticks, second.ticks)
-        self.assertEqual(first.summary, second.summary)
-        summary = second.summary
-        self.assertEqual(summary["proposal_tick"], 16)
-        self.assertEqual(summary["proposal_rank"], 26)
-        self.assertEqual(summary["proposal_param_count"], 5_056)
-        self.assertEqual(summary["decision"], "birth")
-        self.assertEqual(summary["adoption_tick"], 18)
-        self.assertEqual(summary["stale_tick"], 31)
-        self.assertEqual(summary["eviction_tick"], 35)
-        self.assertEqual(summary["active_ticks"], 14)
-        self.assertAlmostEqual(summary["forward_ratio"], 1.0461437156029878, places=12)
-        self.assertAlmostEqual(
-            summary["forward_ratio_flip_only"], 0.9665724706513396, places=12
-        )
-        self.assertEqual(summary["d4_sediments"], 11)
-        self.assertEqual(summary["residents_end"], ())
-        self.assertEqual(summary["patches_end"], ())
-        self.assertEqual(summary["patch_bytes_end"], 0)
-        self.assertEqual(run.organ.overlay_table.records(), ())
-        self.assertEqual(run.organ.overlay_table.active(), ())
-        self.assertEqual([record.stale_tick for record in run.organ.overlay_table.stales], [31])
+    def test_harmful_survivor_is_surfaced_and_refused(self) -> None:
+        """The #22 gate refuses a surfaced harmful survivor (non-vacuous)."""
+        harmful = [
+            row
+            for row in self.rows
+            if row.survivor_id is not None and row.survivor_qualified is False
+        ]
+        self.assertEqual([row.tick for row in harmful], [23, 24, 25, 26])
+        for row in harmful:
+            self.assertGreaterEqual(row.survivor_ratio, 1.0)
+            self.assertEqual(row.gate, "ratchet-gate-blocked")
+            self.assertIsNone(row.promoted_id)
+        self.assertEqual(self.summary["harmful_survivor_ticks"], 4)
         self.assertEqual(
-            [record.overlay_id for record in run.organ.overlay_table.evictions],
-            ["ovr-01"],
+            [item["tick"] for item in self.summary["harmful_survivors"]],
+            [23, 24, 25, 26],
         )
 
-    def test_two_run_calls_are_identical(self) -> None:
-        run = make_run(seed=7)
-        first = run.run(36, flip_at=8, flip_back_at=28)
-        second = run.run(36, flip_at=8, flip_back_at=28)
-        self.assertEqual(first, second)
-        self.assertEqual(run.board.residents(), ())
-        self.assertEqual(run.board.patches(), ())
-        self.assertEqual(run.board.patch_bytes(), 0)
-        self.assertEqual(run.organ.overlay_table.records(), ())
+    def test_promotion_is_the_qualified_survivor(self) -> None:
+        promoted = [row for row in self.rows if row.promoted_id is not None]
+        self.assertEqual(len(promoted), 1)
+        row = promoted[0]
+        self.assertEqual(row.tick, 27)
+        self.assertEqual(row.promoted_id, "cand-01")
+        self.assertEqual(row.gate, "ratchet-gate-passed")
+        self.assertLess(row.candidate_ratio, 1.0)
+        self.assertEqual(row.nursery_ids, ())  # removed atomically on promotion
+        # The D4 sediment is that promotion's output, with the lineage.
+        sediments = self.summary["d4"]["sediments"]
+        self.assertEqual(len(sediments), 1)
+        self.assertEqual(sediments[0]["candidate_lineage"], "cand-01")
+        self.assertEqual(sediments[0]["tick"], 27)
+        self.assertAlmostEqual(
+            sediments[0]["confidence"], 1.0 - row.candidate_ratio, places=12
+        )
 
+    def test_d4_is_append_only_and_retained_byte_identical(self) -> None:
+        trace = self.result.d4_trace
+        self.assertEqual(len(trace), TOTAL_TICKS + 1)
+        self.assertEqual(trace[0], ())
+        for previous, nxt in zip(trace, trace[1:]):
+            self.assertEqual(nxt[: len(previous)], previous)  # append-only
+        self.assertEqual(self.summary["d4"]["retained_byte_identical"], True)
+        self.assertEqual(self.summary["d4"]["byte_identical"], False)
+        self.assertEqual(len(trace[-1]), 1)
+        self.assertEqual(trace[-1], tuple(self.runner.board.d4))
 
-# ---------------------------------------------------------------------------
-# Single-stream acceptance: state lifecycle and the honest fit result
-# ---------------------------------------------------------------------------
-@requires_artifacts
-class TestSingleStreamAcceptance(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = make_run(seed=7)
-        cls.before = pickle.dumps(cls.runner.board.d4, protocol=4)
-        cls.result = cls.runner.acceptance()
-        cls.after = pickle.dumps(cls.runner.board.d4, protocol=4)
+    def test_registered_trace_cannot_reach_the_live_overlay_path(self) -> None:
+        """Reachability finding: one stream never produces a motif cohort."""
+        self.assertEqual(self.summary["cohort_counts"]["motif"], 0)
+        self.assertEqual(self.summary["lifecycle"]["motif_reads"], 0)
+        self.assertEqual(self.summary["lifecycle"]["overlay_birth"], None)
+        self.assertEqual(self.summary["lifecycle"]["overlay_stale"], None)
+        self.assertEqual(self.summary["lifecycle"]["overlay_evict"], None)
+        self.assertGreaterEqual(MOTIF_MIN_PERSISTENCE, 10)  # not tuned this round
+        self.assertFalse(
+            any(row.motif_id is not None for row in self.rows)
+        )
 
-    def test_spike_is_measured(self) -> None:
-        summary = self.result.summary
-        self.assertGreater(summary["spike_peak"], summary["normal_mean"])
-        self.assertGreater(summary["spike_over_normal"], 3.0)
+    def test_tagged_d3_deposits_and_destructive_drain(self) -> None:
+        deposits = [row for row in self.rows if row.cohort_kinds]
+        drains = [row for row in self.rows if row.drained_ids]
+        self.assertGreaterEqual(len(deposits), 1)
+        self.assertGreaterEqual(len(drains), 1)
+        kinds = {kind for row in deposits for kind in row.cohort_kinds}
+        self.assertTrue(kinds <= {"motif", "scaffold", "trail", "residual"})
+        self.assertEqual(kinds, {"trail", "residual"})
+        mass = self.summary["d3"]["mass"]
+        self.assertEqual(
+            mass["deposits"], mass["resident"] + mass["drained"] + mass["evicted"]
+        )
+        self.assertEqual(
+            self.summary["d3"]["drained"], mass["drained"]
+        )
+        self.assertEqual(self.summary["d3"]["ceiling_evictions"], 0)
 
-    def test_state_lifecycle_birth_stale_evict(self) -> None:
-        """A validation-passed patch that later harms is staleness-evicted."""
-        summary = self.result.summary
-        birth = summary["adoption_tick"]
-        stale = summary["stale_tick"]
-        eviction = summary["eviction_tick"]
-        self.assertIsNotNone(birth)
-        self.assertIsNotNone(stale)
-        self.assertIsNotNone(eviction)
-        assert birth is not None and stale is not None and eviction is not None
-        self.assertEqual(birth, 18)  # the decision tick, after 17-18 validation
-        self.assertLess(birth, stale)
-        self.assertLess(stale, eviction)
-        self.assertGreater(summary["active_ticks"], 0)
-        # The harm that triggers staleness is measured on the flip-back ticks:
-        # the patch is beneficial over the flipped window (ADAPTATION gate
-        # 0.9666, PASS) and harmful on the recovered phase (ADMISSION gate
-        # 1.0461, FAIL — see design §15.10 for the pre-registered definitions).
-        self.assertLess(summary["forward_ratio_flip_only"], 1.0)
-        self.assertGreater(summary["forward_ratio"], 1.0)
-        self.assertEqual(self.runner.organ.overlay_table.records(), ())
-        self.assertEqual(self.runner.organ.overlay_table.active(), ())
+    def test_end_state_is_clean(self) -> None:
+        self.assertTrue(self.summary["encoder_bit_identical"])
+        self.assertTrue(self.runner.organ.encoder_bit_identical())
         self.assertEqual(self.runner.board.residents(), ())
         self.assertEqual(self.runner.board.patches(), ())
         self.assertEqual(self.runner.board.patch_bytes(), 0)
-
-    def test_d4_moves_only_by_real_gate_sediments(self) -> None:
-        """Round 9a: the literal empty-D4 snapshot no longer applies.
-
-        The passed patch makes the #22 gate fire 11 times, so D4 grows by 11
-        real, gate-derived bodies.  What must still hold is that the retained
-        contents are byte-identical (see
-        ``TestZeroConfidenceGate.test_retained_invariant_survives_the_scenario``)
-        and that nothing but the gate's own output is retained.
-        """
-        self.assertNotEqual(self.before, self.after)
-        self.assertFalse(self.result.summary["d4_byte_identical"])
-        self.assertEqual(self.result.summary["d4_sediments"], 11)
-        self.assertEqual(len(self.runner.board.d4), 11)
-        self.assertEqual(self.after, pickle.dumps(self.runner.board.d4, protocol=4))
-
-    def test_encoder_bit_identical_after_fit(self) -> None:
-        self.assertTrue(self.result.summary["encoder_bit_identical"])
-        self.assertTrue(self.runner.organ.encoder_bit_identical())
-        self.assertIn("fit_nbytes", self.result.summary)
-
-    def test_d3_pool_bounded(self) -> None:
-        from amateur.payloads import DEBRIS_CAPACITY, DEBRIS_MAX_BYTES
-
-        self.assertGreaterEqual(self.result.summary["debris_bodies"], 1)
-        self.assertLessEqual(self.runner.dry.debris.__len__(), DEBRIS_CAPACITY)
-        self.assertLessEqual(self.runner.dry.debris.byte_size(), DEBRIS_MAX_BYTES)
-
-    def test_adaptation_gate_passes_on_the_flipped_window(self) -> None:
-        """ADAPTATION gate (pre-registered, design §15.10) — PASS.
-
-        Computed independently from the per-tick rows: the ADAPTATION set is
-        the overlay-active rows (``overlay_id is not None``) whose ``phase``
-        is ``"flipped"`` — the intersection of two predicates, not a
-        hardcoded frame range — and the ratio is mean adapted / mean base
-        over that set.  The summary field is then cross-checked, so the trace
-        remains the single source of truth.  ADMISSION (all active ticks) is
-        the separate failing gate, pinned by the ``@expectedFailure`` below.
-        """
-        rows = [
-            row
-            for row in self.result.ticks
-            if row.overlay_id is not None and row.phase == "flipped"
-        ]
-        self.assertEqual(len(rows), 9)
-        adapted = sum(row.surprise for row in rows) / len(rows)
-        base = sum(row.base_surprise for row in rows) / len(rows)
-        ratio = adapted / base
-        self.assertAlmostEqual(ratio, 0.9665724706513396, places=12)
-        self.assertLess(ratio, 1.0)
-        self.assertAlmostEqual(
-            ratio, self.result.summary["forward_ratio_flip_only"], places=12
-        )
-
-    @unittest.expectedFailure
-    def test_single_stream_surprise_drops(self) -> None:
-        """RECORDED FAILURE: the ADMISSION gate still fails on the trace.
-
-        ADMISSION (pre-registered, design §15.10) is the mean adapted/base
-        ratio over *all* overlay-active ticks.  Round 9a measured it on the
-        registered seed-7 trace: the validation-gated rank-26 patch is born
-        at tick 18 (validation 0.133868 vs base 0.147455, ratio 0.9079) and
-        the all-active ratio is 1.0461 (improved from 1.2614 with the dense
-        patch, but still above 1.0), so admission FAILS.  Over the active
-        *flipped* ticks only (the separate ADAPTATION gate) it is 0.9666,
-        i.e. the patch helps during the failure window and hurts after the
-        flip-back, where the ratchet stales and evicts it.  This failure is
-        the round's primary finding: the 2-tick validation admitted a patch
-        whose bounded lifetime harm outweighed its benefit; the online stale
-        rule protected the trace, not the validation.  The assertion is
-        deliberately kept strict on the pre-registered admission metric;
-        do not weaken it to "no material harm" or to the ADAPTATION
-        window — admission policy is deferred to Round 9c.
-        """
-        self.assertLess(self.result.summary["forward_ratio"], 1.0)
+        self.assertEqual(self.runner.board.nursery_patch_bytes(), 0)
+        self.assertTrue(self.summary["lifecycle"]["d2_empty_at_end"])
+        self.assertTrue(self.summary["lifecycle"]["nursery_empty_at_end"])
+        self.assertEqual(self.runner.organ.candidate_ids(), ())
 
 
-# ---------------------------------------------------------------------------
-# Round 9a: pre-adoption validation through the executor
-# ---------------------------------------------------------------------------
 @requires_artifacts
-class TestPreAdoptionValidation(unittest.TestCase):
-    """Proposal at 16, held-out validation on 17-18, decision at 18.
-
-    Both outcomes are measured on real traces: seed 7 passes validation and
-    is later staleness-evicted; seed 0's candidate loses the paired
-    comparison and is rejected before ever being born.
-    """
+class TestAdaptationGate(unittest.TestCase):
+    """ADAPTATION (pre-registered §5): PASS iff strictly below 1.0."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.birth_runner = make_run(seed=7)
-        cls.birth = cls.birth_runner.acceptance()
-        cls.reject_runner = make_run(seed=0)
-        cls.reject = cls.reject_runner.acceptance()
+        cls.runner, cls.result = scenario(REGISTERED_SEED)
 
-    def test_proposal_is_capacity_bounded_and_measured(self) -> None:
-        summary = self.birth.summary
-        self.assertEqual(summary["proposal_tick"], 16)
-        self.assertEqual(summary["proposal_rank"], 26)
-        self.assertEqual(summary["proposal_param_count"], 5_056)
-        self.assertEqual(summary["proposal_capacity"], 5_056)
-        self.assertEqual(summary["proposal_budget_n"], 16)
-        self.assertEqual(summary["validation_ticks"], (17, 18))
-        self.assertEqual(summary["validation_n"], 2)
-        self.assertAlmostEqual(
-            summary["validation_candidate_mean"], 0.13386843726038933, places=12
+    def test_gate_is_recomputed_from_the_rows_and_passes(self) -> None:
+        n, value = _adaptation_from_rows(self.result.ticks)
+        self.assertEqual(n, 8)
+        self.assertAlmostEqual(value, 0.9555247158775397, places=12)
+        self.assertLess(value, ADAPTATION_GATE)
+        summary_gate = self.result.summary["gates"]["adaptation"]
+        self.assertEqual(summary_gate["n"], n)
+        self.assertAlmostEqual(summary_gate["value"], value, places=12)
+        self.assertTrue(summary_gate["passed"])
+        self.assertEqual(summary_gate["threshold"], ADAPTATION_GATE)
+        # Strictness is pinned: the assertion is < 1.0, never <=.
+        self.assertFalse(value >= ADAPTATION_GATE)
+
+    def test_gate_set_is_the_intersection_of_the_two_predicates(self) -> None:
+        selected = {
+            row.tick
+            for row in self.result.ticks
+            if row.phase == "flipped" and row.shadow_ratio is not None
+        }
+        self.assertEqual(selected, set(range(20, 28)))
+        # No shadow row exists outside the flipped phase in this trace.
+        self.assertFalse(
+            any(
+                row.shadow_ratio is not None and row.phase != "flipped"
+                for row in self.result.ticks
+            )
         )
-        self.assertAlmostEqual(
-            summary["validation_base_mean"], 0.1474553719162941, places=12
+
+
+@requires_artifacts
+class TestAdmissionGate(unittest.TestCase):
+    """ADMISSION (pre-registered §5): PASS iff no promoted candidate is harmful."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner, cls.result = scenario(REGISTERED_SEED)
+
+    def test_gate_is_recomputed_from_the_rows_and_passes(self) -> None:
+        count, harmful = _admission_from_rows(self.result.ticks)
+        self.assertEqual(count, ADMISSION_GATE)
+        self.assertEqual(harmful, [])
+        summary_gate = self.result.summary["gates"]["admission"]
+        self.assertEqual(summary_gate["value"], count)
+        self.assertEqual(summary_gate["n"], 1)
+        self.assertTrue(summary_gate["passed"])
+        self.assertEqual(summary_gate["threshold"], ADMISSION_GATE)
+
+    def test_the_promotion_log_agrees_with_the_trace(self) -> None:
+        """The organ mirror and the executor rows are the same promotion."""
+        promotions = self.runner.organ.promotions
+        self.assertEqual(len(promotions), 1)
+        promotion = promotions[0]
+        row = next(row for row in self.result.ticks if row.promoted_id)
+        self.assertEqual(promotion.candidate_id, row.promoted_id)
+        self.assertEqual(promotion.promoted_tick, row.tick)
+        self.assertEqual(promotion.residence_ticks, row.candidate_residence_ticks)
+        self.assertAlmostEqual(promotion.ratio, row.candidate_ratio, places=15)
+        self.assertTrue(promotion.qualified)
+        self.assertEqual(
+            self.result.summary["gates"]["admission"]["promotions"][0]["ratio"],
+            promotion.ratio,
         )
-        self.assertAlmostEqual(
-            summary["validation_ratio"], 0.9078573097790045, places=12
+
+
+@requires_artifacts
+class TestControlSeed0(unittest.TestCase):
+    """Seed 0 is the rejection control; its measured outcome is reported."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner, cls.result = scenario(CONTROL_SEED)
+
+    def test_zero_promotions_but_vacuously(self) -> None:
+        """The registered expectation holds, but no candidate was ever born."""
+        self.assertEqual(self.result.summary["gates"]["admission"]["n"], 0)
+        self.assertEqual(self.result.summary["gates"]["admission"]["value"], 0)
+        self.assertTrue(self.result.summary["gates"]["admission"]["passed"])
+        # Honest finding: the control never triggered under the fit-window
+        # guard (its spikes are all before frame 16), so the zero is vacuous.
+        self.assertEqual(self.runner.births, [])
+        self.assertEqual(self.result.summary["lifecycle"]["candidate_births"], ())
+        self.assertFalse(self.result.summary["candidate_fit"]["attempted"])
+        spikes = [
+            row.tick
+            for row in self.result.ticks
+            if row.base_surprise > self.runner.organ.thresholds.spike_threshold
+        ]
+        self.assertTrue(spikes)
+        self.assertLess(max(spikes), self.runner.fit_window)
+        self.assertEqual(self.result.summary["survivor_ticks"], 0)
+
+    def test_adaptation_has_no_rows_and_is_reported_as_nan(self) -> None:
+        gate = self.result.summary["gates"]["adaptation"]
+        self.assertEqual(gate["n"], 0)
+        self.assertFalse(gate["passed"])
+        self.assertTrue(np.isnan(gate["value"]))
+        self.assertIn("no shadow-scored", gate["reason"])
+
+    def test_d4_is_byte_identical_and_empty(self) -> None:
+        self.assertTrue(self.result.summary["d4"]["byte_identical"])
+        self.assertTrue(self.result.summary["d4"]["retained_byte_identical"])
+        self.assertEqual(self.result.summary["d4"]["sediments"], ())
+        self.assertEqual(self.runner.board.d4, [])
+
+
+@requires_artifacts
+class TestLiveOverlayLifecycle(unittest.TestCase):
+    """The ``#21`` -> ``#24`` -> ``#25`` -> evict lifecycle, executor-side.
+
+    A single stream cannot produce a motif cohort (``MOTIF_MIN_PERSISTENCE``
+    is bank-derived and is **not** tuned), so this test deposits one valid
+    motif cohort into D3 mid-run and lets the executor do the rest.  The
+    fixture supplies only the cohort; every derivation, gate, commit,
+    staleness decision and eviction below is the production path.  This is a
+    wiring test, not a measurement of the registered scenario.
+    """
+
+    DEPOSIT_TICK = 17
+    MOTIF_ID = "motif-fixture-01"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner = PhysicsRun(seed=REGISTERED_SEED)
+        cls.runner.reset()
+        # Drive the registered shape (the test injects one cohort mid-run, so
+        # the loop is walked directly rather than through ``scenario``).
+        cls.runner._flip_at = 8
+        cls.runner._flip_back_at = 28
+        cls.rows = []
+        cls.bodies: dict[int, dict[int, object]] = {}
+        cls.patch_ids: dict[int, tuple[str, ...]] = {}
+        for index in range(1, TOTAL_TICKS + 1):
+            if index == 8 or index == 28:
+                cls.runner.flip_gravity()
+            if index == cls.DEPOSIT_TICK:
+                cls._deposit_motif(index)
+            cls.rows.append(cls.runner.tick())
+            cls.bodies[index] = {
+                fid: cls.runner.dry.derived[fid].body for fid in (8, 21, 23, 24, 25)
+            }
+            cls.patch_ids[index] = tuple(
+                overlay_id for overlay_id, _patch in cls.runner.board.patches()
+            )
+
+    @classmethod
+    def _deposit_motif(cls, tick: int) -> None:
+        provenance = Provenance(19, tick - 1)  # a read must be strictly older
+        cls.runner.dry.debris.deposit(
+            DigestedDebrisBody(
+                debris_id="debris-fixture",
+                cohorts=(
+                    DebrisCohort(
+                        cohort_id=cls.MOTIF_ID,
+                        kind="motif",
+                        centroid=(0.05,) * 64,
+                        count=6,
+                        spread=0.01,
+                        first_tick=8,
+                        last_tick=tick,
+                        peak_surprise=0.5,
+                        provenance=provenance,
+                    ),
+                ),
+            ),
+            provenance,
+            tick,
         )
-        self.assertEqual(summary["decision"], "birth")
-        self.assertEqual(summary["adoption_tick"], 18)
-        self.assertIsNone(summary["rejection_reason"])
 
-    def test_validation_trace_is_visible_per_tick(self) -> None:
-        rows = {row.frame_tick: row for row in self.birth.ticks}
-        self.assertEqual(rows[16].proposal_tick, 16)
-        self.assertEqual(rows[16].validation_n, 0)
-        self.assertEqual(rows[16].validation_ticks, ())
-        self.assertIsNone(rows[16].candidate_mean)
-        self.assertEqual(rows[17].validation_n, 1)
-        self.assertEqual(rows[17].validation_ticks, (17,))
-        self.assertGreater(rows[17].candidate_mean, 0.0)
-        self.assertEqual(rows[18].validation_n, 2)
-        self.assertEqual(rows[18].validation_ticks, (17, 18))
-        self.assertEqual(rows[18].decision, "birth")
-        self.assertIsNone(rows[18].rejection)
-        self.assertEqual(rows[19].decision, None)
-        self.assertEqual(rows[19].candidate_mean, rows[18].candidate_mean)
+    def test_motif_read_drives_the_live_overlay_birth(self) -> None:
+        read = [row for row in self.rows if row.motif_id == self.MOTIF_ID]
+        self.assertTrue(read)
+        self.assertEqual(read[0].tick, self.DEPOSIT_TICK)
+        birth = next(row for row in self.rows if row.adopted is not None)
+        self.assertEqual(birth.tick, self.DEPOSIT_TICK)
+        self.assertEqual(birth.adopted, "ovr-01")
+        self.assertIn("ovr-01", birth.residents)
+        # The D2 write carries the #21 motif lineage (the executor's gate).
+        body = self.bodies[birth.tick][24]
+        self.assertIsInstance(body, MatOverlay)
+        self.assertEqual(body.motif_lineage, self.MOTIF_ID)
+        self.assertEqual(self.bodies[birth.tick][21].motif_id, self.MOTIF_ID)
+        # The live patch is attached to D2 (Q1-A) and bounded.
+        self.assertGreater(birth.patch_bytes, 0)
+        self.assertLessEqual(birth.patch_bytes, MAX_PATCH_TOTAL_BYTES)
+        self.assertIn("ovr-01", self.patch_ids[birth.tick])
+        # The #8/#25 reads label the head active / stale respectively.  On
+        # the birth tick they are still None (the #24 write commits at the end
+        # of that tick); from the next tick on they pair.
+        self.assertIsNone(self.bodies[birth.tick][8])
+        self.assertIsNone(self.bodies[birth.tick][25])
+        active = self.bodies[birth.tick + 1][8]
+        stale = self.bodies[birth.tick + 1][25]
+        self.assertEqual(active.status, "active")
+        self.assertEqual(stale.status, "stale")
+        self.assertEqual(active.overlay_id, stale.overlay_id)
+        self.assertEqual(active.overlay_id, "ovr-01")
+        # The #25 hand-off is the same epoch the head carries, one tick later.
+        self.assertEqual(active.epoch, stale.epoch)
 
-    def test_no_peek_in_the_per_tick_trace(self) -> None:
-        for row in self.birth.ticks:
-            self.assertEqual(len(row.validation_ticks), row.validation_n)
-            for tick in row.validation_ticks:
-                self.assertIsNotNone(row.proposal_tick)
-                assert row.proposal_tick is not None
-                self.assertGreater(tick, row.proposal_tick, msg=f"row {row.frame_tick}")
-                self.assertLessEqual(tick, row.frame_tick)
-        # No validation evidence exists before the proposal tick.
-        for row in self.birth.ticks:
-            if row.frame_tick < PROPOSAL_TICK:
-                self.assertEqual(row.validation_n, 0)
-                self.assertIsNone(row.proposal_tick)
+    def test_revalidation_advances_the_epoch(self) -> None:
+        self.assertGreaterEqual(len(self.runner.organ.overlay_table.revalidations), 1)
+        epochs = [record.epoch for record in self.runner.organ.overlay_table.revalidations]
+        self.assertEqual(epochs, sorted(epochs))
+        self.assertEqual(self.runner.organ.overlay_table.births[0].epoch, 1)
 
-    def test_rejection_trace_has_no_birth_no_activation(self) -> None:
-        summary = self.reject.summary
-        self.assertEqual(summary["proposal_tick"], 16)
-        self.assertEqual(summary["proposal_rank"], 26)
-        self.assertEqual(summary["validation_ticks"], (17, 18))
-        self.assertEqual(summary["decision"], "interference")
-        self.assertEqual(summary["rejection_tick"], 18)
-        self.assertEqual(summary["rejection_reason"], "interference")
-        self.assertIsNone(summary["adoption_tick"])
-        self.assertEqual(summary["active_ticks"], 0)
-        self.assertGreater(
-            summary["validation_candidate_mean"], summary["validation_base_mean"]
+    def test_stale_then_evict_and_both_indices_clean(self) -> None:
+        staled = [row for row in self.rows if row.staled is not None]
+        evicted = [row for row in self.rows if row.evicted]
+        self.assertEqual(len(staled), 1)
+        self.assertEqual(staled[0].staled, "ovr-01")
+        self.assertEqual(len(evicted), 1)
+        self.assertEqual(evicted[0].evicted, ("ovr-01",))
+        self.assertLess(staled[0].tick, evicted[0].tick)
+        self.assertEqual(evicted[0].tick, staled[0].tick + 3)  # STALE_AFTER
+        self.assertEqual(evicted[-1].residents, ())
+        self.assertEqual(evicted[-1].patch_bytes, 0)
+        self.assertEqual(self.runner.board.residents(), ())
+        self.assertEqual(self.runner.board.patches(), ())
+        self.assertEqual(self.runner.organ.overlay_table.records(), ())
+        self.assertEqual(self.runner.organ.overlay_table.active(), ())
+        # The store's #8/#25 reads are the *pre-eviction* state on the
+        # eviction tick (the organ decides first, the prune mirrors at the
+        # end of the same tick) and None from the next tick on.
+        self.assertEqual(self.bodies[evicted[0].tick][8].overlay_id, "ovr-01")
+        self.assertIsNone(self.bodies[evicted[0].tick + 1][8])
+        self.assertIsNone(self.bodies[evicted[0].tick + 1][25])
+
+    def test_the_registered_run_never_enters_this_path(self) -> None:
+        _runner, result = scenario(REGISTERED_SEED)
+        self.assertEqual(result.summary["lifecycle"]["overlay_birth"], None)
+        self.assertEqual(result.summary["d4"]["sediments"][0]["candidate_lineage"], "cand-01")
+
+
+@requires_artifacts
+class TestRejectWithChargeAndNoop(unittest.TestCase):
+    """Reject-with-charge and the Q4 zero-confidence no-op, physics path."""
+
+    def _drive_to(self, tick: int) -> PhysicsRun:
+        run = PhysicsRun(seed=REGISTERED_SEED)
+        run.reset()
+        run._flip_at, run._flip_back_at = 8, 28
+        for index in range(1, tick):
+            if index == 8:
+                run.flip_gravity()
+            run.tick()
+        return run
+
+    def test_duplicate_arrival_is_charged_and_state_is_unchanged(self) -> None:
+        run = self._drive_to(24)  # t23/t24 surface a harmful survivor
+        d4_before = tuple(run.board.d4)
+        before = (
+            sum(run.dry.attempted.values()),
+            sum(run.dry.accepted.values()),
+            sum(run.dry.refused.values()),
+            run.board.nursery_ids(),
+            len(run.board.d4),
         )
-        self.assertAlmostEqual(
-            summary["validation_candidate_mean"], 0.1909084, places=6
+        row = run.tick(injections={22: 2})
+        after = (
+            sum(run.dry.attempted.values()),
+            sum(run.dry.accepted.values()),
+            sum(run.dry.refused.values()),
         )
-        self.assertAlmostEqual(
-            summary["validation_base_mean"], 0.1338746, places=6
+        attempted = after[0] - before[0]
+        accepted = after[1] - before[1]
+        refused = after[2] - before[2]
+        # Identity A on the #22 channel: attempts = accepts + refusals.
+        self.assertEqual(attempted, accepted + refused)
+        self.assertGreaterEqual(refused, 1)
+        # The refused copies are not consumed: identity B holds on #22.
+        self.assertEqual(run.dry.accepted[22], run.dry.consumed[22])
+        # The accepted zero-confidence copy is a consumed no-op.
+        self.assertEqual(row.gate, "ratchet-gate-blocked")
+        self.assertIsNone(row.promoted_id)
+        self.assertEqual(tuple(run.board.d4), d4_before)
+        self.assertEqual(run.board.nursery_ids(), before[3])
+        self.assertEqual(len(run.board.d4), before[4])
+        self.assertGreater(run.dry.zero_confidence_absorbed[22], 0)
+
+    def test_positive_gate_needs_the_consumed_survivor_lineage(self) -> None:
+        """A positive #22 must cite this tick's consumed #23 survivor."""
+        run = self._drive_to(27)
+        row = run.tick()
+        self.assertEqual(row.tick, 27)
+        self.assertEqual(row.promoted_id, "cand-01")
+        body = run.dry.derived[22].body
+        self.assertEqual(body.candidate_lineage, run.dry.derived[23].body.candidate_id)
+        self.assertGreater(body.confidence, 0.0)
+        self.assertLessEqual(body.confidence, 1.0)
+
+
+@requires_artifacts
+class TestPatchAccounting(unittest.TestCase):
+    """D2 substance accounting: candidates and overlays, atomic eviction."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner, cls.result = scenario(REGISTERED_SEED)
+
+    def test_no_orphan_patch_or_record_at_any_tick(self) -> None:
+        self.assertEqual(self.runner.board.patches(), ())
+        self.assertEqual(self.runner.board.resident_ids(), frozenset())
+        self.assertEqual(self.runner.board.nursery_ids(), ())
+        self.assertLessEqual(
+            self.result.summary["max_patch_bytes_seen"],
+            MAX_PATCH_TOTAL_BYTES,
         )
-        # Nothing was born, activated or attached, and the end state is clean.
-        self.assertEqual(self.reject_runner.organ.overlay_table.all_ids(), frozenset())
-        self.assertEqual(self.reject_runner.organ.overlay_table.active(), ())
-        self.assertEqual(self.reject_runner.board.residents(), ())
-        self.assertEqual(self.reject_runner.board.patches(), ())
-        self.assertEqual(self.reject_runner.board.patch_bytes(), 0)
-        self.assertEqual(self.reject_runner.board.d4, [])
-        self.assertTrue(summary["d4_byte_identical"])
-        self.assertEqual(summary["d4_sediments"], 0)
-        self.assertTrue(summary["encoder_bit_identical"])
-        self.assertTrue(self.reject_runner.organ.encoder_bit_identical())
-        # The fit itself was admissible: the refusal is the validation's.
-        self.assertEqual(summary["fit_reason"], "")
-        self.assertEqual(summary["fit_nbytes"], 20_224)
 
-    def test_rejection_is_publicly_readable(self) -> None:
-        rejections = self.reject_runner.organ.rejections
-        self.assertEqual(len(rejections), 1)
-        record = rejections[0]
-        self.assertEqual(record.tick, 18)
-        self.assertEqual(record.reason, "interference")
-        self.assertEqual(record.n, 2)
-        self.assertGreater(record.candidate_mean, record.base_mean)
-        self.assertEqual(record.budget.n_transitions, 16)
-        self.assertEqual(record.budget.max_rank, 26)
-        self.assertEqual(record.budget.max_params, 5_056)
-        # The per-tick trace shows the rejection at the decision tick.
-        rows = {row.frame_tick: row for row in self.reject.ticks}
-        self.assertEqual(rows[18].decision, "interference")
-        self.assertEqual(rows[18].rejection, "interference")
-        self.assertIsNone(rows[18].adopted)
-        self.assertGreater(rows[18].candidate_mean, rows[18].base_mean)
+    def test_resident_without_patch_asserts(self) -> None:
+        from amateur.payloads import EmergentCrystalBody, MatBoard
+
+        board = MatBoard(seed=False)
+        board.nursery_birth(
+            EmergentCrystalBody(
+                candidate_id="cand-x",
+                residual=(0.0,) * 64,
+                surprise=0.0,
+                born_tick=1,
+            ),
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            board.assert_patch_bounds(require_complete=True)
+
+    def test_oversized_candidate_patch_fails_before_the_commit(self) -> None:
+        """The outer byte ceiling fails closed in the derivation pass (Q1-A)."""
+        from amateur.payloads import EmergentCrystalBody
+
+        run = PhysicsRun(seed=REGISTERED_SEED)
+        run.reset()
+        # A candidate record whose patch claims more bytes than the ceiling.
+        board = run.board
+        board.nursery_birth(
+            EmergentCrystalBody(
+                candidate_id="cand-big",
+                residual=(0.0,) * 64,
+                surprise=0.0,
+                born_tick=1,
+            ),
+            1,
+        )
+
+        class _BigPatch:
+            overlay_id = "cand-big"
+            nbytes = MAX_PATCH_TOTAL_BYTES + 1
+            param_count = 1
+
+        with self.assertRaises(ValueError):
+            board.attach_candidate_patch("cand-big", _BigPatch())
+        self.assertEqual(board.nursery_patch_bytes(), 0)
+        self.assertEqual(board.patch_bytes(), 0)
 
 
-if __name__ == "__main__":
+@requires_artifacts
+class TestResetRepeatability(unittest.TestCase):
+    def test_two_scenarios_are_identical(self) -> None:
+        first_run = PhysicsRun(seed=REGISTERED_SEED)
+        first = first_run.scenario(seed=REGISTERED_SEED)
+        second_run = PhysicsRun(seed=REGISTERED_SEED)
+        second = second_run.scenario(seed=REGISTERED_SEED)
+        self.assertEqual(first.ticks, second.ticks)
+        self.assertEqual(first.summary["gates"], second.summary["gates"])
+        self.assertEqual(
+            first.summary["residence_curve"], second.summary["residence_curve"]
+        )
+
+    def test_reset_clears_the_nursery_and_the_store(self) -> None:
+        run = PhysicsRun(seed=REGISTERED_SEED)
+        result = run.scenario(seed=REGISTERED_SEED)
+        self.assertEqual(len(result.ticks), TOTAL_TICKS)
+        run.reset()
+        self.assertEqual(run.ticks, [])
+        self.assertEqual(run.births, [])
+        self.assertEqual(run.organ.candidate_ids(), ())
+        self.assertEqual(run.board.nursery_ids(), ())
+        self.assertEqual(run.board.residents(), ())
+        self.assertEqual(run.board.d4, [])
+        self.assertEqual(run.board.patch_bytes(), 0)
+        self.assertFalse(run.organ.promotions)
+
+
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -1,36 +1,25 @@
-"""Typed payloads for the geometry stores, schema-enforced.
+"""Typed payloads for the geometry and operational stores, schema-enforced.
 
-INV-EMPTINESS by construction: the D4 (Base Core) write channel accepts
-only `BiasPrimitive` records -- a whitelist, not a blacklist -- so a
-trajectory, state-delta, or context payload is not merely forbidden, it is
-unrepresentable on that channel. INV-NO-OSSIFY: D2 (Multi-Layer Mat)
-payloads carry epochs, and the `MatBoard` lifecycle guarantees no resident
-overlay's epoch falls more than one tick behind the present.
+Round 11 (rulings A-G): the D2 write kinds are pinned **per flow**, never
+per store.  #18 carries `EmergentCrystalBody` (the nursery candidate kind)
+and #24 carries `MatOverlay` (the ratcheted overlay kind); the candidate
+lives in its own index and is never a `MatOverlay` status.  D2 reads are
+pinned too: #8/#25 read `MatOverlay`, #23 reads `SurvivingCrystalBody`.
+D3 is a cohort-level store (`DebrisCohort`), with per-edge read filters and
+a destructive #27 drain.  `None` is no longer permitted on a modeled store
+channel: a "no event" is a real exact-type sentinel.  D1 `BoardStore`
+(#13/#14) is frozen work and keeps its prior behaviour (see the D1 section).
 
-Schema (user-adjudicated):
-- D2 payloads: (epoch, overlay_id, status in {active, stale, candidate});
-  `candidate` is the Round-10 PROVISIONAL birth status for #18 (an
-  emergent crystal entering the nursery, not yet vetted by 6.0);
-- D4 payloads: (bias_primitive, confidence in [0, 1]); trajectory,
-  state-delta, and context types are excluded by the whitelist;
-- the phase-4/5 real flows carry frozen, hashable body records (see the
-  ``*Body`` classes below); every other non-store flow stays a placeholder
-  (payload None).  ``None`` remains allowed on every non-store channel, so
-  the synthetic plumbing source and the still-placeholder flows keep
-  working unchanged.
+INV-EMPTINESS: the D4 write channel accepts only `BiasPrimitive`; the D2
+write channels are exact-type per flow.  INV-NO-OSSIFY applies to the
+overlay index, whose `mat_*_policy` semantics are **unchanged**; the
+candidate index has its own FIFO capacity (`NURSERY_CAPACITY`) and is not
+a second overlay stream.
 
 Physics-epoch bodies are *content*, never provenance: the ``Envelope``
 carries ``(source_fid, tick_born)`` and the exact-type gate compares body
 types only.  All bodies are frozen dataclasses whose fields are tuples and
 scalars, so they are hashable exactly when the envelope needs them to be.
-
-Accounting surfaces added for phase 4-5b (task-6):
-- ``DebrisPool``: D3, capacity + byte ceiling, provenance-preserving.
-- ``MatBoard`` patch table: D2 holds the predictor patch keyed by
-  ``overlay_id`` (Q1-A); records stay ``MatOverlay``; patches are accounted
-  in bytes against ``MAX_PATCH_BYTES`` per patch and ``MAX_PATCH_TOTAL_BYTES``
-  per table.  The record lifecycle is unchanged (Lean mirror); the byte
-  accounting is Python-asserted and marked *tested-not-proven*.
 """
 from __future__ import annotations
 
@@ -60,8 +49,14 @@ NO_DEBRIS_ID = "debris-none"
 NO_MOTIF_ID = "motif-none"
 NO_MANDATE_REASON = "none"
 
-#: D3 production bounds: 8 bodies x 512 B centroid + bookkeeping, 64 KiB.
-DEBRIS_CAPACITY = 8
+#: D3 production bounds (Round 11, cohort-level).  The old record-level
+#: capacity of 8 became 32 cohorts: ~2-4 cohorts are emitted per tick
+#: (residual + trail, plus scaffold/motif), so a capacity of 8 would evict a
+#: motif cohort before #21 can read it on the next tick and silently starve
+#: the #21 -> #24 live-overlay path.  32 cohorts ~= the old 8 bodies x 4 kinds
+#: of material, keeps the byte ceiling comfortable (~18 KiB at ~560 B per
+#: cohort), and still leaves capacity pressure as a real mechanism (#17).
+DEBRIS_CAPACITY = 32
 DEBRIS_MAX_BYTES = 65_536
 
 #: D1 production bound: 8 context slots (design constant, like D3's 8).
@@ -78,42 +73,78 @@ BOARD_OP_VERBS = ("write", "erase", "resize", "evict")
 MAX_PATCH_BYTES = 262_144
 MAX_PATCH_TOTAL_BYTES = 1_048_576
 
+#: Round 11 D2 candidate index and D3 cohort model (contract §1.8/§1.9).
+NURSERY_CAPACITY = 4
+RESIDENCE_N = 4
+DEBRIS_TTL = 12
+COHORT_KINDS = ("motif", "scaffold", "trail", "residual")
+
+#: Reserved no-event identity for the candidate kind (#18/#23).
+NO_CANDIDATE_ID = "cand-none"
+
 
 # ---------------------------------------------------------------------------
 # Geometry records (unchanged)
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class MatOverlay:
-    """One D2 mat overlay: epoch-stamped so staleness is checkable."""
+    """One D2 ratcheted overlay: epoch-stamped so staleness is checkable.
+
+    Round 11: the `candidate` status is **removed** (candidates are a
+    separate kind in the candidate index).  ``motif_lineage`` is the #21
+    motif id for a #24 write; it is required non-None by the #24 execution
+    gate, while the seed/read records carry None.
+    """
 
     epoch: int
     overlay_id: str
     status: str
+    motif_lineage: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.epoch) is not int or isinstance(self.epoch, bool):
+            raise TypeError(f"epoch must be an int, got {self.epoch!r}")
         if self.epoch < 0:
             raise ValueError(f"epoch must be >= 0, got {self.epoch}")
-        #: PROVISIONAL round 10: ``candidate`` is the #18 birth status of the
-        #: corrected graph (an unvetted emergent crystal in the nursery);
-        #: ``active``/``stale`` remain the vetted lifecycle.  Pending user
-        #: adjudication of the crystal lexicon and #18's payload shape.
-        if self.status not in ("active", "stale", "candidate"):
+        if type(self.overlay_id) is not str or not self.overlay_id:
+            raise ValueError("overlay_id must be a non-empty string")
+        if self.status not in ("active", "stale"):
             raise ValueError(
-                f"status must be active|stale|candidate, got {self.status!r}"
+                f"status must be active|stale, got {self.status!r}"
             )
+        if self.motif_lineage is not None and (
+            type(self.motif_lineage) is not str or not self.motif_lineage
+        ):
+            raise ValueError("motif_lineage must be a non-empty string or None")
 
 
 @dataclass(frozen=True)
 class BiasPrimitive:
-    """One D4 sedimented bias: confidence-weighted, trajectory-free."""
+    """One D4 sedimented bias: confidence-weighted, trajectory-free.
+
+    Round 11 adds the #23 candidate lineage; it is required non-None by the
+    #22 execution gate (physics mode), while the Q4 zero-confidence sentinel
+    carries None.
+    """
 
     bias_primitive: str
     confidence: float
+    candidate_lineage: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.bias_primitive) is not str or not self.bias_primitive:
+            raise ValueError("bias_primitive must be a non-empty string")
+        _require_finite("confidence", self.confidence)
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError(
                 f"confidence must be in [0, 1], got {self.confidence}"
+            )
+        if self.candidate_lineage is not None and (
+            type(self.candidate_lineage) is not str
+            or not self.candidate_lineage
+        ):
+            raise ValueError(
+                "candidate_lineage must be a non-empty string or None"
             )
 
 
@@ -331,46 +362,163 @@ class CollapseMandateBody:
 
 @dataclass(frozen=True)
 class EmergentCrystalBody:
-    """#18 P3 -> P5: a candidate residual vector before digestion."""
+    """#18 P3 -> D2: the nursery candidate kind (Round 11 ruling A).
 
+    This is the *only* body type #18 may carry and the only type stored in
+    the candidate index.  ``born_tick`` must equal the #18 emission tick;
+    there is no ``candidate`` status on ``MatOverlay`` (candidates are a
+    separate kind, not a tagged overlay stream).
+    """
+
+    candidate_id: str
     residual: tuple[float, ...]
     surprise: float
-    tick: int
+    born_tick: int
 
     def __post_init__(self) -> None:
+        if type(self.candidate_id) is not str or not self.candidate_id:
+            raise ValueError("candidate_id must be a non-empty string")
         _require_vector("residual", self.residual)
         _require_finite("surprise", self.surprise)
-        if self.tick < 0:
-            raise ValueError("tick must be non-negative")
+        if type(self.born_tick) is not int or isinstance(self.born_tick, bool):
+            raise TypeError(f"born_tick must be an int, got {self.born_tick!r}")
+        if self.born_tick < 0:
+            raise ValueError("born_tick must be non-negative")
 
 
 @dataclass(frozen=True)
-class DigestedDebrisBody:
-    """#19 P5 -> D3: a real residual cluster (the D3 body)."""
+class SurvivingCrystalBody:
+    """#23 D2 -> P6: a candidate surfaced by its residence evidence.
 
-    debris_id: str
+    ``qualified`` is the read-time selection (`ratio < 1` and
+    ``residence_ticks >= RESIDENCE_N``); there is no stored "surviving"
+    kind and no third overlay status.
+    """
+
+    candidate_id: str
+    born_tick: int
+    residence_ticks: int
+    adapted_mean: float
+    base_mean: float
+    ratio: float
+    qualified: bool
+
+    def __post_init__(self) -> None:
+        if type(self.candidate_id) is not str or not self.candidate_id:
+            raise ValueError("candidate_id must be a non-empty string")
+        for name in ("born_tick", "residence_ticks"):
+            value = getattr(self, name)
+            if type(value) is not int or isinstance(value, bool):
+                raise TypeError(f"{name} must be an int, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        for name in ("adapted_mean", "base_mean", "ratio"):
+            _require_finite(name, getattr(self, name))
+        if self.base_mean <= 0.0:
+            raise ValueError("base_mean must be positive")
+        if type(self.qualified) is not bool:
+            raise TypeError("qualified must be a bool")
+        expected = self.ratio < 1.0 and self.residence_ticks >= RESIDENCE_N
+        if self.qualified is not expected:
+            raise ValueError(
+                "qualified must be exactly (ratio < 1 and residence_ticks "
+                ">= RESIDENCE_N)"
+            )
+
+
+@dataclass(frozen=True)
+class DebrisCohort:
+    """One D3 cohort: tagged material class with depositing provenance.
+
+    ``provenance`` is validated structurally (it must expose
+    ``source_fid``/``tick_born``) so ``payloads`` never imports
+    ``provenance`` at module scope; the executor passes a real
+    ``Provenance``.
+    """
+
+    cohort_id: str
+    kind: str
     centroid: tuple[float, ...]
     count: int
     spread: float
     first_tick: int
     last_tick: int
     peak_surprise: float
+    provenance: object
 
     def __post_init__(self) -> None:
-        if not isinstance(self.debris_id, str):
-            raise TypeError("debris_id must be a string")
+        if type(self.cohort_id) is not str or not self.cohort_id:
+            raise ValueError("cohort_id must be a non-empty string")
+        if self.kind not in COHORT_KINDS:
+            raise ValueError(
+                f"kind must be one of {COHORT_KINDS}, got {self.kind!r}"
+            )
         _require_vector("centroid", self.centroid)
+        if type(self.count) is not int or isinstance(self.count, bool):
+            raise TypeError(f"count must be an int, got {self.count!r}")
         if self.count < 0:
-            raise ValueError("count must be non-negative (0 marks the no-op)")
+            raise ValueError("count must be non-negative")
         _require_finite("spread", self.spread)
+        for name in ("first_tick", "last_tick"):
+            value = getattr(self, name)
+            if type(value) is not int or isinstance(value, bool):
+                raise TypeError(f"{name} must be an int, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
         _require_finite("peak_surprise", self.peak_surprise)
-        if self.first_tick < 0 or self.last_tick < 0:
-            raise ValueError("ticks must be non-negative")
+        _require_provenance_shape(self.provenance)
+
+
+def _require_provenance_shape(value: object) -> None:
+    """Structural provenance check (avoids payloads <-> provenance cycle)."""
+    source_fid = getattr(value, "source_fid", None)
+    tick_born = getattr(value, "tick_born", None)
+    if type(source_fid) is not int or isinstance(source_fid, bool):
+        raise TypeError("provenance.source_fid must be an int")
+    if source_fid not in {flow.fid for flow in FLOW_LEDGER}:
+        raise ValueError("provenance.source_fid is not a ledger flow id")
+    if type(tick_born) is not int or isinstance(tick_born, bool):
+        raise TypeError("provenance.tick_born must be an int")
+    if tick_born < 0:
+        raise ValueError("provenance.tick_born must be non-negative")
+
+
+@dataclass(frozen=True)
+class DigestedDebrisBody:
+    """#19 P5 -> D3: a tagged composite of cohort classes (Round 11 F)."""
+
+    debris_id: str
+    cohorts: tuple[DebrisCohort, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.debris_id) is not str or not self.debris_id:
+            raise ValueError("debris_id must be a non-empty string")
+        if not isinstance(self.cohorts, tuple):
+            raise TypeError("cohorts must be a tuple of DebrisCohort")
+        for cohort in self.cohorts:
+            if type(cohort) is not DebrisCohort:
+                raise TypeError(
+                    "cohorts entries must be exact DebrisCohort bodies"
+                )
+        ids = tuple(cohort.cohort_id for cohort in self.cohorts)
+        if len(set(ids)) != len(ids):
+            raise ValueError("cohort ids must be unique within one body")
+
+
+@dataclass(frozen=True)
+class ScaffoldsBody:
+    """#20 D3 -> P4: scaffold cohorts only (per-edge read filter)."""
+
+    cohorts: tuple[DebrisCohort, ...]
+    no_event: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_filtered_cohorts(self.cohorts, "scaffold", self.no_event)
 
 
 @dataclass(frozen=True)
 class StructuralMotifBody:
-    """#21 P5 -> P6: a stable cluster extracted as a rule."""
+    """#21 D3 -> P6: the motif cohort read from the debris pool."""
 
     motif_id: str
     debris_id: str
@@ -383,31 +531,113 @@ class StructuralMotifBody:
     last_tick: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.motif_id, str) or not isinstance(self.debris_id, str):
-            raise TypeError("motif_id/debris_id must be strings")
+        for name in ("motif_id", "debris_id"):
+            value = getattr(self, name)
+            if type(value) is not str or not value:
+                raise ValueError(f"{name} must be a non-empty string")
         _require_vector("centroid", self.centroid)
-        if self.count < 0 or self.persistence < 0:
-            raise ValueError("count/persistence must be non-negative")
+        for name in ("count", "persistence"):
+            value = getattr(self, name)
+            if type(value) is not int or isinstance(value, bool):
+                raise TypeError(f"{name} must be an int, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
         _require_finite("spread", self.spread)
         _require_finite("drift", self.drift)
-        if self.first_tick < 0 or self.last_tick < 0:
-            raise ValueError("ticks must be non-negative")
+        for name in ("first_tick", "last_tick"):
+            value = getattr(self, name)
+            if type(value) is not int or isinstance(value, bool):
+                raise TypeError(f"{name} must be an int, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+
+
+@dataclass(frozen=True)
+class AvoidanceTrailsBody:
+    """#26 D3 -> P2: trail cohorts only (per-edge read filter)."""
+
+    cohorts: tuple[DebrisCohort, ...]
+    no_event: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_filtered_cohorts(self.cohorts, "trail", self.no_event)
+
+
+@dataclass(frozen=True)
+class DissipatedEntropyBody:
+    """#27 D3 -> P1: residual + expired cohorts, drained destructively."""
+
+    cohort_ids: tuple[str, ...]
+    magnitudes: tuple[float, ...]
+    tick: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.cohort_ids, tuple):
+            raise TypeError("cohort_ids must be a tuple")
+        if not isinstance(self.magnitudes, tuple):
+            raise TypeError("magnitudes must be a tuple")
+        for cohort_id in self.cohort_ids:
+            if type(cohort_id) is not str or not cohort_id:
+                raise ValueError("cohort_ids entries must be non-empty strings")
+        if len(set(self.cohort_ids)) != len(self.cohort_ids):
+            raise ValueError("cohort_ids must be unique")
+        if len(self.magnitudes) != len(self.cohort_ids):
+            raise ValueError("magnitudes must match cohort_ids length")
+        for magnitude in self.magnitudes:
+            _require_finite("magnitude", magnitude)
+        if type(self.tick) is not int or isinstance(self.tick, bool):
+            raise TypeError(f"tick must be an int, got {self.tick!r}")
+        if self.tick < 0:
+            raise ValueError("tick must be non-negative")
+
+
+def _validate_filtered_cohorts(
+    cohorts: tuple[DebrisCohort, ...], kind: str, no_event: bool
+) -> None:
+    if not isinstance(cohorts, tuple):
+        raise TypeError("cohorts must be a tuple of DebrisCohort")
+    for cohort in cohorts:
+        if type(cohort) is not DebrisCohort:
+            raise TypeError("cohorts entries must be exact DebrisCohort bodies")
+        if cohort.kind != kind:
+            raise ValueError(
+                f"this body carries {kind} cohorts only, got {cohort.kind!r}"
+            )
+    if type(no_event) is not bool:
+        raise TypeError("no_event must be a bool")
+    if no_event and cohorts:
+        raise ValueError("a no-event body must carry no cohorts")
 
 
 # ---------------------------------------------------------------------------
 # Fixed-cadence no-op sentinels (exact-type, content-free)
 # ---------------------------------------------------------------------------
+def noop_crystal() -> EmergentCrystalBody:
+    """The #18 no-event candidate body."""
+    return EmergentCrystalBody(
+        candidate_id=NO_CANDIDATE_ID,
+        residual=(0.0,) * PAYLOAD_LATENT_DIM,
+        surprise=0.0,
+        born_tick=0,
+    )
+
+
+def noop_survivor() -> SurvivingCrystalBody:
+    """The #23 no-event survivor body (not qualified)."""
+    return SurvivingCrystalBody(
+        candidate_id=NO_CANDIDATE_ID,
+        born_tick=0,
+        residence_ticks=0,
+        adapted_mean=0.0,
+        base_mean=1.0,
+        ratio=0.0,
+        qualified=False,
+    )
+
+
 def noop_debris() -> DigestedDebrisBody:
     """The #19 no-event body: a real body the D3 pool absorbs as a no-op."""
-    return DigestedDebrisBody(
-        debris_id=NO_DEBRIS_ID,
-        centroid=(0.0,) * PAYLOAD_LATENT_DIM,
-        count=0,
-        spread=0.0,
-        first_tick=0,
-        last_tick=0,
-        peak_surprise=0.0,
-    )
+    return DigestedDebrisBody(debris_id=NO_DEBRIS_ID, cohorts=())
 
 
 def noop_motif() -> StructuralMotifBody:
@@ -425,6 +655,21 @@ def noop_motif() -> StructuralMotifBody:
     )
 
 
+def noop_scaffolds() -> ScaffoldsBody:
+    """The #20 no-event body: an empty scaffold cohort read."""
+    return ScaffoldsBody(cohorts=(), no_event=True)
+
+
+def noop_trails() -> AvoidanceTrailsBody:
+    """The #26 no-event body: an empty trail cohort read."""
+    return AvoidanceTrailsBody(cohorts=(), no_event=True)
+
+
+def noop_entropy() -> DissipatedEntropyBody:
+    """The #27 no-event body: nothing drainable."""
+    return DissipatedEntropyBody(cohort_ids=(), magnitudes=(), tick=0)
+
+
 def noop_mandate() -> CollapseMandateBody:
     """The #17 no-event body: a real body P4 consumes as a no-op."""
     return CollapseMandateBody(
@@ -438,8 +683,13 @@ def noop_mandate() -> CollapseMandateBody:
 
 
 def noop_overlay() -> MatOverlay:
-    """The #18/#24 write no-event token: a real MatOverlay the mat ignores."""
+    """The #24 no-event token: a real MatOverlay the mat ignores."""
     return MatOverlay(0, NOOP_OVERLAY_ID, "stale")
+
+
+def noop_bias() -> BiasPrimitive:
+    """The #7/#22 no-event bias sentinel (Q4 zero confidence)."""
+    return BiasPrimitive("ratchet-gate-blocked", 0.0, None)
 
 
 # ---------------------------------------------------------------------------
@@ -477,44 +727,68 @@ NON_READ_FLOWS: frozenset[int] = frozenset(
 )
 
 _PLACEHOLDER = frozenset({type(None)})
-_MAT_READ = frozenset({MatOverlay, type(None)})
-_MAT_WRITE = frozenset({MatOverlay})
-_BIAS_READ = frozenset({BiasPrimitive, type(None)})
-_BIAS_WRITE = frozenset({BiasPrimitive})
 
-#: The phase-4/5 real-flow bodies.  None stays allowed on each channel so
-#: the synthetic plumbing source and the still-placeholder flows are
-#: unchanged; a physics derivation always returns the typed body.
+#: Round 11 §1.1 (corrected): WRITE channels are exact-type with no None —
+#: a promotion bug becomes untypeable, not merely rejected.  READ channels
+#: allow the exact type OR None ("the store had nothing to hand over this
+#: tick"); None keeps the A2 provenance rule intact (a body read must carry
+#: the stored record's provenance with tick_born < emit_tick; None carries
+#: self-origin (fid, tick)).  A sentinel body on a read would force a
+#: sentinel-provenance exception and weaken the anti-mint gate.
+#: D1 is frozen: #13/#14 keep their prior optional shapes and #11/#15 stay
+#: None placeholders until #13 lands (contract §2.1).
+WRITE_BODY: dict[int, type] = {
+    18: EmergentCrystalBody,   # D2 candidate write
+    19: DigestedDebrisBody,    # D3 deposit
+    22: BiasPrimitive,         # D4 sediment
+    24: MatOverlay,            # D2 ratcheted overlay write
+}
+
+READ_BODY: dict[int, type] = {
+    7: BiasPrimitive,          # D4 read
+    8: MatOverlay,             # D2 overlay read (active ratcheted only)
+    16: CostErrorBody,         # derived this round
+    20: ScaffoldsBody,         # D3 scaffold read
+    21: StructuralMotifBody,   # D3 motif read
+    23: SurvivingCrystalBody,  # D2 survivor read
+    25: MatOverlay,            # D2 stale read
+    26: AvoidanceTrailsBody,   # D3 trail read
+    27: DissipatedEntropyBody, # D3 destructive drain read
+}
+
+#: Non-store real-flow bodies (None remains allowed on these channels so the
+#: synthetic plumbing source and the not-yet-derived flows keep working).
 REAL_BODIES: dict[int, type] = {
     3: FrameBody,
     6: PredictionErrorBody,
     10: LatentRolloutBody,
     12: StateDeltaBody,
+    13: BoardOpBody,
+    14: SlotStateBody,
     16: CostErrorBody,
     17: CollapseMandateBody,
     18: EmergentCrystalBody,
     19: DigestedDebrisBody,
+    20: ScaffoldsBody,
     21: StructuralMotifBody,
-    13: BoardOpBody,
-    14: SlotStateBody,
+    23: SurvivingCrystalBody,
+    26: AvoidanceTrailsBody,
+    27: DissipatedEntropyBody,
 }
 
 
 def _schema() -> dict[int, frozenset[type]]:
     schema: dict[int, frozenset[type]] = {}
-    for f in FLOW_LEDGER:
-        if f.fid in D2_WRITES:
-            schema[f.fid] = _MAT_WRITE
-        elif f.fid in D2_FLOWS:
-            schema[f.fid] = _MAT_READ
-        elif f.fid in D4_WRITES:
-            schema[f.fid] = _BIAS_WRITE
-        elif f.fid in D4_FLOWS:
-            schema[f.fid] = _BIAS_READ
-        elif f.fid in REAL_BODIES:
-            schema[f.fid] = frozenset({REAL_BODIES[f.fid], type(None)})
+    for flow in FLOW_LEDGER:
+        fid = flow.fid
+        if fid in WRITE_BODY:
+            schema[fid] = frozenset({WRITE_BODY[fid]})
+        elif fid in READ_BODY:
+            schema[fid] = frozenset({READ_BODY[fid], type(None)})
+        elif fid in REAL_BODIES:
+            schema[fid] = frozenset({REAL_BODIES[fid], type(None)})
         else:
-            schema[f.fid] = _PLACEHOLDER
+            schema[fid] = _PLACEHOLDER
     return schema
 
 
@@ -579,8 +853,19 @@ class MatBoard:
         self.byte_evictions: list[tuple[str, int, int]] = []
         self.d4: list[BiasPrimitive] = []
 
+        # Round 11 §1.9: the candidate index is a separate nursery, not a
+        # tagged overlay stream.  The overlay index above is untouched.
+        self._nursery: deque[tuple[str, int]] = deque()
+        self._nursery_bodies: dict[str, EmergentCrystalBody] = {}
+        self._nursery_seen: set[str] = set()
+        self._candidate_patches: dict[str, object] = {}
+        self._evidence: dict[str, list[tuple[int, float, float]]] = {}
+        self._nursery_evictions: list[tuple[str, int, int, str]] = []
+        self._nursery_promotions: list[tuple[str, int]] = []
+
     # ------------------------------------------------------------- D4 core
     def sediment(self, bias: BiasPrimitive) -> None:
+        require_payload(22, bias)
         self.d4.append(bias)
 
     def latest_bias(self) -> BiasPrimitive | None:
@@ -591,6 +876,7 @@ class MatBoard:
         return self._residents[0]
 
     def birth(self, overlay: MatOverlay) -> None:
+        require_payload(24, overlay)
         if overlay.overlay_id in self.resident_ids():
             raise ValueError(
                 f"duplicate D2 birth for overlay_id {overlay.overlay_id!r}; "
@@ -599,6 +885,7 @@ class MatBoard:
         self._residents.append((overlay.overlay_id, overlay.epoch))
 
     def revalidate(self, overlay: MatOverlay) -> None:
+        require_payload(24, overlay)
         if not self._residents:
             raise RuntimeError(
                 f"revalidation of {overlay.overlay_id!r} on an empty board"
@@ -644,6 +931,190 @@ class MatBoard:
     def resident_ids(self) -> frozenset[str]:
         return frozenset(overlay_id for overlay_id, _epoch in self._residents)
 
+    # --------------------------------------------------- D2 candidate index
+    def nursery_birth(self, body: EmergentCrystalBody, tick: int) -> None:
+        """Append one #18 candidate; duplicate/used ids are refused."""
+        require_payload(18, body)
+        if type(tick) is not int or isinstance(tick, bool) or tick < 0:
+            raise ValueError(f"tick must be a non-negative int, got {tick!r}")
+        if body.born_tick != tick:
+            raise ValueError(
+                f"candidate {body.candidate_id!r} born_tick {body.born_tick} "
+                f"!= #18 emission tick {tick}"
+            )
+        if body.candidate_id in self._nursery_seen:
+            raise ValueError(
+                f"duplicate/resurrected candidate_id {body.candidate_id!r}"
+            )
+        self._nursery.append((body.candidate_id, body.born_tick))
+        self._nursery_bodies[body.candidate_id] = body
+        self._evidence[body.candidate_id] = []
+        self._nursery_seen.add(body.candidate_id)
+        while len(self._nursery) > NURSERY_CAPACITY:
+            evicted_id, evicted_born = self._nursery.popleft()
+            self._nursery_evictions.append(
+                (evicted_id, evicted_born, tick, "capacity")
+            )
+            self._nursery_bodies.pop(evicted_id, None)
+            self._evidence.pop(evicted_id, None)
+            self._candidate_patches.pop(evicted_id, None)
+
+    def nursery_observe(
+        self, candidate_id: str, adapted: float, base: float, tick: int
+    ) -> None:
+        """Append one shadow measurement to a resident candidate."""
+        evidence = self._evidence.get(candidate_id)
+        if evidence is None or candidate_id not in self.nursery_ids():
+            raise ValueError(f"unknown candidate_id {candidate_id!r}")
+        if type(tick) is not int or isinstance(tick, bool) or tick < 0:
+            raise ValueError(f"tick must be a non-negative int, got {tick!r}")
+        _require_finite("adapted", adapted)
+        _require_finite("base", base)
+        born_tick = self._nursery_bodies[candidate_id].born_tick
+        if tick < born_tick:
+            raise ValueError(
+                f"shadow tick {tick} precedes candidate birth {born_tick}"
+            )
+        if evidence and tick <= evidence[-1][0]:
+            raise ValueError(
+                "shadow observations must have strictly increasing ticks"
+            )
+        evidence.append((tick, float(adapted), float(base)))
+
+    def nursery_records(self) -> tuple[EmergentCrystalBody, ...]:
+        """Resident candidate bodies, oldest-first."""
+        return tuple(
+            self._nursery_bodies[candidate_id]
+            for candidate_id, _born in self._nursery
+        )
+
+    def nursery_evidence(
+        self, candidate_id: str
+    ) -> tuple[tuple[int, float, float], ...]:
+        if candidate_id not in self._evidence:
+            raise ValueError(f"unknown candidate_id {candidate_id!r}")
+        return tuple(self._evidence[candidate_id])
+
+    def nursery_survivor(self, now: int) -> SurvivingCrystalBody | None:
+        """Surface the lowest-ratio resident with enough residence evidence.
+
+        Correction (contract §1.9): this selection **must not pre-filter on
+        ``qualified``**.  If #23 only ever surfaced ``ratio < 1`` candidates,
+        #22's gate and the ADMISSION metric would be vacuous; the harmful
+        survivor has to remain observable as surfaced-and-refused.  Among
+        residents with ``residence_ticks >= RESIDENCE_N`` the lowest ratio
+        wins (tie-break oldest birth, then FIFO order), regardless of
+        ``ratio``; ``qualified = (ratio < 1.0)`` is carried as a flag.
+        ``None`` is returned iff no resident has enough residence.
+        ``residence_ticks`` is the number of shadow-scored observations
+        (contract §1.3), not wall-clock age; ``now`` is validated and a
+        candidate born after it is not considered.
+        """
+        if type(now) is not int or isinstance(now, bool) or now < 0:
+            raise ValueError(f"now must be a non-negative int, got {now!r}")
+        best: tuple[float, int, int] | None = None
+        best_body: SurvivingCrystalBody | None = None
+        for index, (candidate_id, born_tick) in enumerate(self._nursery):
+            if born_tick > now:
+                continue
+            evidence = self._evidence[candidate_id]
+            residence_ticks = len(evidence)
+            if residence_ticks < RESIDENCE_N:
+                continue
+            adapted_mean = sum(item[1] for item in evidence) / residence_ticks
+            base_mean = sum(item[2] for item in evidence) / residence_ticks
+            if base_mean <= 0.0:
+                continue
+            ratio = adapted_mean / base_mean
+            key = (ratio, born_tick, index)
+            if best is None or key < best:
+                best = key
+                best_body = SurvivingCrystalBody(
+                    candidate_id=candidate_id,
+                    born_tick=born_tick,
+                    residence_ticks=residence_ticks,
+                    adapted_mean=adapted_mean,
+                    base_mean=base_mean,
+                    ratio=ratio,
+                    qualified=ratio < 1.0,
+                )
+        return best_body
+
+    def nursery_promote(self, candidate_id: str, tick: int) -> EmergentCrystalBody:
+        """Remove a candidate and its patch atomically (INV-PROMOTE-ONCE)."""
+        if candidate_id not in self.nursery_ids():
+            raise ValueError(
+                f"cannot promote {candidate_id!r}: unknown or already promoted"
+            )
+        if type(tick) is not int or isinstance(tick, bool) or tick < 0:
+            raise ValueError(f"tick must be a non-negative int, got {tick!r}")
+        body = self._nursery_bodies.pop(candidate_id)
+        for index, (resident_id, born_tick) in enumerate(self._nursery):
+            if resident_id == candidate_id:
+                del self._nursery[index]
+                break
+        self._candidate_patches.pop(candidate_id, None)
+        self._nursery_promotions.append((candidate_id, tick))
+        return body
+
+    def nursery_evict_record(
+        self, candidate_id: str, tick: int, cause: str
+    ) -> EmergentCrystalBody:
+        """Remove one candidate record and its patch (organ prune path)."""
+        if candidate_id not in self.nursery_ids():
+            raise ValueError(f"cannot evict unknown candidate {candidate_id!r}")
+        if type(cause) is not str or not cause:
+            raise ValueError("cause must be a non-empty string")
+        if type(tick) is not int or isinstance(tick, bool) or tick < 0:
+            raise ValueError(f"tick must be a non-negative int, got {tick!r}")
+        body = self._nursery_bodies.pop(candidate_id)
+        born_tick = body.born_tick
+        for index, (resident_id, _born) in enumerate(self._nursery):
+            if resident_id == candidate_id:
+                del self._nursery[index]
+                break
+        self._candidate_patches.pop(candidate_id, None)
+        self._nursery_evictions.append((candidate_id, born_tick, tick, cause))
+        return body
+
+    def nursery_ids(self) -> tuple[str, ...]:
+        return tuple(candidate_id for candidate_id, _born in self._nursery)
+
+    def nursery_patch(self, candidate_id: str) -> object | None:
+        return self._candidate_patches.get(candidate_id)
+
+    def nursery_patch_bytes(self) -> int:
+        return sum(
+            _patch_attr(patch, "nbytes")
+            for patch in self._candidate_patches.values()
+        )
+
+    def attach_candidate_patch(
+        self, candidate_id: str, patch: object
+    ) -> None:
+        """Attach a candidate's substance patch (E); never live steering."""
+        if candidate_id not in self.nursery_ids():
+            raise AssertionError(
+                f"cannot attach a patch to non-resident candidate "
+                f"{candidate_id!r}"
+            )
+        patch_id = getattr(patch, "overlay_id", None)
+        if patch_id is None:
+            patch_id = getattr(patch, "candidate_id", None)
+        if patch_id != candidate_id:
+            raise ValueError(
+                f"patch id {patch_id!r} does not match candidate "
+                f"{candidate_id!r}"
+            )
+        nbytes = _patch_attr(patch, "nbytes")
+        if nbytes > self.max_patch_bytes:
+            raise ValueError(
+                f"candidate patch {candidate_id!r} is {nbytes} bytes, over "
+                f"the per-patch ceiling {self.max_patch_bytes}"
+            )
+        _patch_attr(patch, "param_count")
+        self._candidate_patches[candidate_id] = patch
+
     # ----------------------------------------------------------- D2 patches
     def attach_patch(self, overlay_id: str, patch: object) -> None:
         """Attach the predictor patch for a resident record (Q1-A)."""
@@ -672,24 +1143,51 @@ class MatBoard:
         return tuple(self._patches.items())
 
     def patch_bytes(self) -> int:
-        return sum(_patch_attr(patch, "nbytes") for patch in self._patches.values())
+        """Total D2 substance: overlay patches + candidate patches (E)."""
+        return (
+            sum(_patch_attr(patch, "nbytes") for patch in self._patches.values())
+            + sum(
+                _patch_attr(patch, "nbytes")
+                for patch in self._candidate_patches.values()
+            )
+        )
 
     def patch_params(self) -> int:
-        return sum(
-            _patch_attr(patch, "param_count") for patch in self._patches.values()
+        return (
+            sum(
+                _patch_attr(patch, "param_count")
+                for patch in self._patches.values()
+            )
+            + sum(
+                _patch_attr(patch, "param_count")
+                for patch in self._candidate_patches.values()
+            )
         )
 
     def enforce_patch_ceiling(self, tick: int) -> None:
-        """Evict resident records (and their patches) until the byte bound holds."""
+        """Evict patched residents until the combined D2 byte bound holds.
+
+        Overlay victims are removed first (their record+patch semantics are
+        unchanged); candidate victims are used only when no overlay patch
+        remains.  The total bound covers both indices (E).
+        """
         while self.patch_bytes() > self.max_patch_total_bytes:
             victims = [
                 overlay_id
                 for overlay_id, _epoch in self._residents
                 if overlay_id in self._patches
             ]
-            if not victims:
+            if victims:
+                self._remove(victims[0], tick, cause="patch-bytes")
+                continue
+            candidates = [
+                candidate_id
+                for candidate_id in self.nursery_ids()
+                if candidate_id in self._candidate_patches
+            ]
+            if not candidates:
                 break
-            self._remove(victims[0], tick, cause="patch-bytes")
+            self.nursery_evict_record(candidates[0], tick, "patch-bytes")
 
     def assert_patch_bounds(self, *, require_complete: bool = False) -> None:
         """Python-asserted substance bound (tested-not-proven; Lean: records).
@@ -701,50 +1199,68 @@ class MatBoard:
         """
         residents = self.resident_ids()
         patch_ids = frozenset(self._patches)
+        candidates = frozenset(self.nursery_ids())
+        candidate_patch_ids = frozenset(self._candidate_patches)
         assert patch_ids <= residents, (
-            f"orphan patches {sorted(patch_ids - residents)} have no resident"
+            f"orphan overlay patches {sorted(patch_ids - residents)} "
+            "have no resident"
+        )
+        assert candidate_patch_ids <= candidates, (
+            f"orphan candidate patches "
+            f"{sorted(candidate_patch_ids - candidates)} have no resident"
         )
         assert len(residents) <= MAT_CAPACITY, "record capacity exceeded"
+        assert len(candidates) <= NURSERY_CAPACITY, "nursery capacity exceeded"
         assert self.patch_bytes() <= self.max_patch_total_bytes, (
             f"patch table {self.patch_bytes()} > {self.max_patch_total_bytes} bytes"
         )
-        for overlay_id, patch in self._patches.items():
-            nbytes = _patch_attr(patch, "nbytes")
-            assert nbytes <= self.max_patch_bytes, (
-                f"patch {overlay_id!r} {nbytes} > {self.max_patch_bytes} bytes"
-            )
+        for table in (self._patches, self._candidate_patches):
+            for owner_id, patch in table.items():
+                nbytes = _patch_attr(patch, "nbytes")
+                assert nbytes <= self.max_patch_bytes, (
+                    f"patch {owner_id!r} {nbytes} > "
+                    f"{self.max_patch_bytes} bytes"
+                )
         if require_complete:
-            missing = sorted(residents - patch_ids)
-            assert not missing, f"resident overlays without a patch: {missing}"
+            seed_exempt = {MAT_SEED[0]} if MAT_SEED[0] in residents else set()
+            missing_overlays = sorted(residents - patch_ids - seed_exempt)
+            missing_candidates = sorted(candidates - candidate_patch_ids)
+            assert not missing_overlays, (
+                f"resident overlays without a patch: {missing_overlays}"
+            )
+            assert not missing_candidates, (
+                f"resident candidates without a patch: {missing_candidates}"
+            )
 
 
 # ---------------------------------------------------------------------------
-# D3 debris pool
+# D3 debris pool (Round 11: cohort-level, tagged, destructive #27 drain)
 # ---------------------------------------------------------------------------
-def _debris_bytes(body: DigestedDebrisBody) -> int:
-    """Deterministic body size: centroid floats + scalar fields + id."""
+class DebrisCeilingExceeded(RuntimeError):
+    """The D3 byte ceiling would be exceeded without an allowed eviction."""
+
+
+def _cohort_bytes(cohort: DebrisCohort) -> int:
+    """Deterministic represented size of one cohort (no provenance bytes)."""
     return (
-        len(body.centroid) * 8
+        len(cohort.centroid) * 8
         + 8 * 5  # count, spread, first_tick, last_tick, peak_surprise
-        + len(body.debris_id.encode("utf-8"))
+        + len(cohort.cohort_id.encode("utf-8"))
+        + len(cohort.kind.encode("utf-8"))
     )
 
 
-@dataclass(frozen=True)
-class DebrisEntry:
-    """One stored D3 body plus the provenance of the #19 write that made it."""
-
-    body: DigestedDebrisBody
-    provenance: object
-
-
 class DebrisPool:
-    """D3 Debris & Scaffolding Pool: bounded by capacity and bytes.
+    """D3 Debris & Scaffolding Pool: cohort-level store (F).
 
-    ``deposit`` appends a #19 body (never the fixed-cadence no-op) and
-    evicts the oldest entries until both ceilings hold.  Reads hand back
-    the stored body *and* its provenance, so a D3 read inherits the
-    producing write's provenance exactly as the D2/D4 reads do.
+    Storage is cohort-level, not body-level: ``deposit`` splits the #19
+    composite into `DebrisCohort` entries, each retaining its depositing
+    provenance.  Reads are **non-destructive** and per-kind; #27 is the one
+    destructive drain (``drain``).  Capacity overflow evicts FIFO; byte
+    overflow raises `DebrisCeilingExceeded` unless the caller allows the
+    recorded eviction backstop.  The asserted mass identity is
+    ``deposits == resident + drained + evicted`` (contract §0/§1.8); the
+    ruling's issuance account is reported separately as ``issuance``.
     """
 
     def __init__(
@@ -752,41 +1268,223 @@ class DebrisPool:
         capacity: int = DEBRIS_CAPACITY,
         max_bytes: int = DEBRIS_MAX_BYTES,
     ) -> None:
-        if capacity < 1 or max_bytes < 1:
-            raise ValueError("capacity and max_bytes must be positive")
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError("capacity must be a positive int")
+        if type(max_bytes) is not int or max_bytes < 1:
+            raise ValueError("max_bytes must be a positive int")
         self.capacity = int(capacity)
         self.max_bytes = int(max_bytes)
-        self._entries: deque[DebrisEntry] = deque()
-        self.evictions: list[tuple[DigestedDebrisBody, object, int]] = []
+        self._entries: deque[DebrisCohort] = deque()
+        self._deposits = 0
+        self._evicted = 0
+        self._ceiling_evicted = 0
+        self._drained = 0
+        self._promoted: set[str] = set()
+        self._reads_by_kind: dict[str, int] = {
+            kind: 0 for kind in COHORT_KINDS
+        }
+        self.evictions: list[DebrisCohort] = []
+        self.drains: list[DebrisCohort] = []
+        self.promotions: list[tuple[str, int]] = []
 
+    # ------------------------------------------------------------- deposit
     def deposit(
         self,
         body: DigestedDebrisBody,
         provenance: object,
         tick: int,
-    ) -> tuple[DebrisEntry, ...]:
-        """Store one body; returns the entries evicted to respect the bounds."""
+        *,
+        allow_ceiling_evict: bool = False,
+    ) -> tuple[DebrisCohort, ...]:
+        """Deposit a tagged composite; return the cohorts it displaced.
+
+        Capacity overflow (FIFO) is always handled.  Byte-ceiling overflow
+        raises `DebrisCeilingExceeded` unless `allow_ceiling_evict=True`, in
+        which case oldest cohorts are evicted and counted as
+        ``ceiling_evicted``.  The operation is rejected atomically: on a
+        raised ceiling no deposit/eviction counter changes.
+        """
         if type(body) is not DigestedDebrisBody:
-            raise TypeError(f"DebrisPool accepts DigestedDebrisBody, got {type(body).__name__}")
-        if body.debris_id == NO_DEBRIS_ID:
+            raise TypeError(
+                f"DebrisPool accepts DigestedDebrisBody, got "
+                f"{type(body).__name__}"
+            )
+        if body.debris_id == NO_DEBRIS_ID or not body.cohorts:
             raise ValueError("the fixed-cadence no-op is not deposited")
-        self._entries.append(DebrisEntry(body, provenance))
-        evicted: list[DebrisEntry] = []
-        while self._entries and (
-            len(self._entries) > self.capacity or self.byte_size() > self.max_bytes
+        if type(tick) is not int or isinstance(tick, bool) or tick < 0:
+            raise ValueError(f"tick must be a non-negative int, got {tick!r}")
+        _require_provenance_shape(provenance)
+        cohorts = list(body.cohorts)
+
+        combined = list(self._entries) + cohorts
+        capacity_evicted: list[DebrisCohort] = []
+        while len(combined) > self.capacity:
+            capacity_evicted.append(combined.pop(0))
+
+        ceiling_evicted: list[DebrisCohort] = []
+        if sum(_cohort_bytes(c) for c in combined) > self.max_bytes:
+            if not allow_ceiling_evict:
+                raise DebrisCeilingExceeded(
+                    f"deposit would make D3 exceed {self.max_bytes} bytes "
+                    "(drain or allow the recorded eviction backstop)"
+                )
+            while (
+                combined
+                and sum(_cohort_bytes(c) for c in combined) > self.max_bytes
+            ):
+                ceiling_evicted.append(combined.pop(0))
+
+        self._entries = deque(combined)
+        self._deposits += len(cohorts)
+        for cohort in capacity_evicted:
+            self._record_evicted(cohort, ceiling=False)
+        for cohort in ceiling_evicted:
+            self._record_evicted(cohort, ceiling=True)
+        self._assert_balance()
+        return tuple(capacity_evicted + ceiling_evicted)
+
+    def _record_evicted(self, cohort: DebrisCohort, *, ceiling: bool) -> None:
+        self.evictions.append(cohort)
+        self._evicted += 1
+        if ceiling:
+            self._ceiling_evicted += 1
+
+    def evict_to_ceiling(self, tick: int) -> tuple[DebrisCohort, ...]:
+        """Recorded FIFO backstop when a drained pool is still over ceiling."""
+        if type(tick) is not int or isinstance(tick, bool) or tick < 0:
+            raise ValueError(f"tick must be a non-negative int, got {tick!r}")
+        evicted: list[DebrisCohort] = []
+        while (
+            self._entries
+            and sum(_cohort_bytes(c) for c in self._entries) > self.max_bytes
         ):
-            entry = self._entries.popleft()
-            self.evictions.append((entry.body, entry.provenance, tick))
-            evicted.append(entry)
+            cohort = self._entries.popleft()
+            self._record_evicted(cohort, ceiling=True)
+            evicted.append(cohort)
+        self._assert_balance()
         return tuple(evicted)
 
+    # --------------------------------------------------------------- reads
+    def read(self, kind: str) -> tuple[DebrisCohort, ...]:
+        """Non-destructive per-kind read, oldest-first; counts the read."""
+        if kind not in COHORT_KINDS:
+            raise ValueError(
+                f"kind must be one of {COHORT_KINDS}, got {kind!r}"
+            )
+        self._reads_by_kind[kind] += 1
+        return tuple(cohort for cohort in self._entries if cohort.kind == kind)
+
+    def best_motif(self) -> DebrisCohort | None:
+        """Highest (count, persistence) motif; oldest-first tie-break.
+
+        `DebrisCohort` has no separate persistence field in the contract
+        schema, so persistence is the cohort's observed span,
+        ``last_tick - first_tick`` (reported as a contract ambiguity).
+        """
+        best: DebrisCohort | None = None
+        best_key: tuple[int, int] | None = None
+        for cohort in self._entries:
+            if cohort.kind != "motif":
+                continue
+            key = (cohort.count, cohort.last_tick - cohort.first_tick)
+            if best_key is None or key > best_key:
+                best, best_key = cohort, key
+        return best
+
+    def drainable(self, now: int) -> tuple[DebrisCohort, ...]:
+        """Residual cohorts plus cohorts older than DEBRIS_TTL, oldest-first."""
+        if type(now) is not int or isinstance(now, bool) or now < 0:
+            raise ValueError(f"now must be a non-negative int, got {now!r}")
+        return tuple(
+            cohort
+            for cohort in self._entries
+            if cohort.kind == "residual"
+            or now - cohort.last_tick > DEBRIS_TTL
+        )
+
+    def drain(self, cohort_ids: tuple[str, ...], tick: int) -> tuple[DebrisCohort, ...]:
+        """Destructive #27 removal; unknown/double-drained ids raise."""
+        if not isinstance(cohort_ids, tuple):
+            raise TypeError("cohort_ids must be a tuple")
+        if type(tick) is not int or isinstance(tick, bool) or tick < 0:
+            raise ValueError(f"tick must be a non-negative int, got {tick!r}")
+        if len(set(cohort_ids)) != len(cohort_ids):
+            raise ValueError("cohort_ids must be unique")
+        by_id = {cohort.cohort_id: cohort for cohort in self._entries}
+        missing = [cohort_id for cohort_id in cohort_ids if cohort_id not in by_id]
+        if missing:
+            raise ValueError(f"cannot drain unknown/expired cohorts {missing!r}")
+        removed = tuple(by_id[cohort_id] for cohort_id in cohort_ids)
+        removed_ids = set(cohort_ids)
+        self._entries = deque(
+            cohort
+            for cohort in self._entries
+            if cohort.cohort_id not in removed_ids
+        )
+        for cohort in removed:
+            self.drains.append(cohort)
+        self._drained += len(removed)
+        self._assert_balance()
+        return removed
+
+    def promote(self, cohort_id: str, tick: int) -> None:
+        """Mark a resident cohort promoted; INV-PROMOTE-ONCE (non-destructive)."""
+        if type(tick) is not int or isinstance(tick, bool) or tick < 0:
+            raise ValueError(f"tick must be a non-negative int, got {tick!r}")
+        if not any(cohort.cohort_id == cohort_id for cohort in self._entries):
+            raise ValueError(f"cannot promote unknown cohort {cohort_id!r}")
+        if cohort_id in self._promoted:
+            raise ValueError(
+                f"INV-PROMOTE-ONCE: cohort {cohort_id!r} was already promoted"
+            )
+        self._promoted.add(cohort_id)
+        self.promotions.append((cohort_id, tick))
+
+    # ------------------------------------------------------------- accounting
+    def _assert_balance(self) -> None:
+        assert self._deposits == len(self._entries) + self._drained + self._evicted, (
+            "D3 mass balance broken: "
+            f"deposits={self._deposits}, resident={len(self._entries)}, "
+            f"drained={self._drained}, evicted={self._evicted}"
+        )
+
+    def mass_balance(self) -> dict:
+        """Conservation identity plus the separate ruling-F issuance account."""
+        self._assert_balance()
+        promoted = len(self._promoted)
+        issuance = {
+            "promoted": promoted,
+            "resident_unpromoted": sum(
+                cohort.cohort_id not in self._promoted
+                for cohort in self._entries
+            ),
+            "drained_unpromoted": sum(
+                cohort.cohort_id not in self._promoted
+                for cohort in self.drains
+            ),
+        }
+        return {
+            "deposits": self._deposits,
+            "resident": len(self._entries),
+            "drained": self._drained,
+            "evicted": self._evicted,
+            "ceiling_evicted": self._ceiling_evicted,
+            "promoted": promoted,
+            "reads_by_kind": dict(self._reads_by_kind),
+            "issuance": issuance,
+        }
+
+    def over_ceiling(self) -> bool:
+        return self.byte_size() > self.max_bytes
+
     def byte_size(self) -> int:
-        return sum(_debris_bytes(entry.body) for entry in self._entries)
+        return sum(_cohort_bytes(cohort) for cohort in self._entries)
 
-    def bodies(self) -> tuple[DigestedDebrisBody, ...]:
-        return tuple(entry.body for entry in self._entries)
+    def bodies(self) -> tuple[DebrisCohort, ...]:
+        """Resident cohorts, oldest-first (cohort-level storage)."""
+        return tuple(self._entries)
 
-    def newest(self) -> DebrisEntry | None:
+    def newest(self) -> DebrisCohort | None:
         return self._entries[-1] if self._entries else None
 
     def __len__(self) -> int:

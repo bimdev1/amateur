@@ -1,13 +1,14 @@
-"""Phase 4-5a physics organ: P5 digest + P6 predictor overlay.
+"""Phase 4-5 physics organ: tagged-cohort P5 digest + P6 candidate nursery.
 
 This module is the **standalone physics organ** for the flippable 2-D world.
 It owns E1 (the environment) and the phase-3 micro-LeWM (frozen encoder,
-trained predictor) and implements the phase-5/6 state machines as pure,
-testable objects -- there is **no executor coupling** here.  The executor
-wiring plan is in ``docs/phase4-5-design.md``.
+trained predictor).  There is still **no executor coupling** here: the
+executor wiring lives in :mod:`amateur.physics.run`, and the payload types
+live in :mod:`amateur.payloads`.
 
-Three layers, each independently testable
------------------------------------------
+Round 11 architecture (rulings C, E, F) -- the candidate is the evidence
+carrier, not the live overlay
+-------------------------------------------------------------------------
 1. :class:`Observation` -- one causal observation tick: the frame latent,
    the latent state delta (#12), the model surprise (#6/#12), the residual
    vector (the real debris candidate), a 3-frame causal window, and a short
@@ -15,21 +16,63 @@ Three layers, each independently testable
 2. :class:`ResidualDigester` (P5) -- a bounded online residual clusterer.
    Only residuals above the measured normal q99 enter; residuals are
    assigned to centroids within a merge radius, clusters are merged to make
-   room, and the pool is hard-capped at ``debris_capacity``.  It emits
-   :class:`DigestedDebris` (D3 bodies), :class:`StructuralMotif` (when a
-   cluster is stable), and :class:`CollapseMandate` (when the ceiling forces
-   a collapse).
-3. :class:`OverlayTable` + :class:`PredictorOverlay` (P6) -- a cheap
-   predictor-only, **capacity-bounded low-rank** patch keyed by
-   ``overlay_id``, stored in a side table, with ``(epoch, overlay_id,
-   status)`` records, birth / revalidate / stale / evict transitions and
-   capacity 4.  Round 9a: the stored substance is a low-rank delta of the
-   last head layer only (``u @ v.T`` + bias), with the rank set by the
-   evidence budget in :mod:`amateur.physics.capacity`; a dense head+norm
-   or full-predictor patch is inadmissible.  **The encoder is never
-   touched:** fitting happens on a deep copy of the predictor and the
-   encoder parameters are asserted bit-identical (``torch.equal``) before
-   and after every fit.
+   room, and the pool is hard-capped at ``debris_capacity``.  Round 11:
+   every digest item is **tagged** into one of the four cohort classes
+   (``motif`` / ``residual`` / ``scaffold`` / ``trail``) and exposed as
+   ``DigestResult.cohorts``; that tuple is what the source packs into the
+   single tagged ``#19`` composite body.  Merge sources and capacity
+   evictions are surfaced as *scaffold* cohorts (the support machinery P4
+   recycles), and each assignment leaves a *trail* cohort (the routing
+   trace).
+3. :class:`CandidateTable` (the organ-side D2 **nursery**, #18) -- a
+   candidate is a capacity-bounded low-rank predictor patch that is
+   **substance and never steering**.  :meth:`PhysicsOrgan.birth_candidate`
+   fits it from the last real transitions of a stream (the same
+   capacity-bounded fit and refusal records as the ratchet), stores it in
+   the nursery, and never applies it: :meth:`PhysicsOrgan.shadow_scores`
+   evaluates every resident candidate's patch on a *shadow copy of the
+   predictor* against the base predictor on each tick's real transition and
+   asserts the encoder and the live predictor are bit-identical afterwards.
+   Accumulated residence evidence (``adapted_mean / base_mean`` over at
+   least ``RESIDENCE_N`` shadow-scored ticks) is what ``#23`` surfaces: the
+   survivor is the **lowest-ratio** resident with enough residence, and
+   ``qualified`` (``ratio < 1.0``) is carried as a flag, **not** applied as a
+   selection filter -- a harmful survivor must stay observable so that
+   ``#22``'s refusal is testable and ADMISSION is not vacuous.  Only a
+   *qualified* survivor may be lineage-consumed by ``#22``.
+4. :class:`OverlayTable` + :class:`PredictorOverlay` (P6) -- the **live**
+   ratchet.  Live patches arrive only via ``#24``, driven by a ``#21`` motif
+   cohort read out of D3: :meth:`PhysicsOrgan.adopt_motif` fits (capacity
+   bounded) or revalidates the overlay behind that motif and activates it.
+   Birth / revalidate / stale / cooldown / evict semantics are unchanged
+   from round 9a.
+
+Ruling (C): the live-overlay D4 gate is **gone**.  Round 9a's
+``ratchet_gate_passed`` / ``_accrue_gate_evidence`` / ``_record_gate_evidence``
+decided ``#22`` from live-overlay evidence; round 11 rules that nothing
+reaches D4 that did not reside in D2 and get surfaced by ``#23``.  The
+decision path is replaced by candidate residence evidence
+(:meth:`PhysicsOrgan.residence_evidence`).  Staleness -- which genuinely
+needs the live overlay's own adapted-vs-base comparison -- is kept: a live
+patch that stops improving on what it has to correct goes stale and is then
+evicted.
+
+Capacity bound (Round 9a, unchanged)
+------------------------------------
+The stored patch is a **capacity-bounded low-rank delta of the last head
+layer only** (``head.2`` weight + bias, factors ``u @ v.T``), fitted under
+``K <= gamma * N * D`` with ``gamma = 5.0`` in
+:mod:`amateur.physics.capacity`.  ``N`` is the number of real evidence
+transitions actually used, counted from the data.  A dense head+norm or
+full-predictor patch is inadmissible (a different patch class, not a larger
+budget).  Every refusal is recorded in ``fit_history`` with a reason
+(``capacity`` / ``no-evidence`` / ``no-improvement``) and the budget it was
+judged against -- never silent.
+
+**The encoder is never touched:** every fit happens on a deep copy of the
+base model, and the encoder parameters are asserted bit-identical
+(``torch.equal``) before and after every fit, every shadow score and every
+overlay activation.
 
 Threshold derivation (measured phase-3 statistics, not synthetic noise)
 -----------------------------------------------------------------------
@@ -46,33 +89,28 @@ normal_baseline  ``normal_mean``                                 0.049386
 ===============  =============================================  =========
 
 The ``merge_radius`` is the Euclidean norm of a post-flip residual at its
-measured q95 (``||e||**2 == latent_dim * surprise``); the measured RMS
-distance of flipped residual vectors to their centroid is ``3.919`` and the
-measured q95 spread is ``6.790``, so one cluster with radius ``6.744``
-covers the flipped regime.  Structural constants (pool capacity, overlay
-capacity, motif support, persistence gate) are **design choices**, listed
-with their justification in :class:`DigestThresholds` and in the design
-memo's honesty notes.
+measured q95 (``||e||**2 == latent_dim * surprise``).  Structural constants
+(pool capacity, overlay capacity, nursery capacity, residence N, motif
+support, persistence gate) are **design choices**, listed with their
+justification in :class:`DigestThresholds` and in the design memo's honesty
+notes; ``RESIDENCE_N = 4`` and ``gamma = 5.0`` are pre-registered design
+constants, not measurements.
 
 Measured limits (honest, see the memo's numbered notes)
 -------------------------------------------------------
 * A predictor-only patch fitted on a **single** stream's window is not
-  guaranteed to improve forward surprise.  Round 9a's capacity-bounded
-  rank-26 patch measures 0.9666x over the active *flipped* ticks and
-  1.0461x over every active tick of the registered seed-7 trace, and it
-  passes pre-adoption validation (0.9079x on the held-out ticks 17-18).
-  The bank fit/held-out probe remains the shaped positive result (0.8226x
-  on unseen streams); see ``docs/phase4-5-design.md`` §15.
-* Only the last head layer is adapted (low-rank, ``head.2`` weight + bias):
-  the GRU and hidden state are untouched, so applying/clearing an overlay is
-  exact with no replay, and the encoder is never part of any fit.  Round 9a
-  makes the dense head+norm and full-predictor patches inadmissible; the
-  exact byte ceilings in D2 remain as storage bounds.
-* Pre-adoption validation (Round 9a): a fitted candidate is *proposed*, not
-  adopted.  It is validated against the base predictor on the next
-  ``validation_window`` held-out observations of the same stream and born
-  only if it wins with a strict mean comparison; otherwise the rejection is
-  recorded publicly with both means (``PhysicsOrgan.rejections``).
+  guaranteed to improve forward surprise.  Round 9a's single-stream
+  result was mixed (it helped on the flipped window and harmed on the full
+  active window of the registered trace; see
+  ``docs/phase4-5-design.md`` §15.4/§15.10, historical, old 26-flow
+  topology).  Round 11 therefore does not re-assert any round 7-9a number:
+  the evidence carrier changed, and the numbers are re-measured in the
+  round's registered runs.
+* Only the last head layer is adapted, so applying/clearing an overlay is
+  exact with no replay, and ``changes_gru`` is false everywhere.  This is
+  also what makes shadow scoring sound: a head-only patch leaves the GRU
+  hidden state untouched, so the shadow predictor can be stepped with the
+  live stream's own ``hidden_before``.
 """
 from __future__ import annotations
 
@@ -87,32 +125,44 @@ import numpy as np
 import torch
 
 from .capacity import EvidenceBudget
+
+try:  # the round-11 schema is owned by ``amateur/payloads.py`` (wave 1)
+    from ..payloads import NURSERY_CAPACITY, RESIDENCE_N
+except ImportError:  # pragma: no cover - in-flight wave-1 schema window
+    # The contract pins both values (§1.8: NURSERY_CAPACITY = 4,
+    # RESIDENCE_N = 4).  The fallback keeps the organ importable while
+    # ``payloads.py`` is being rewritten; ``tests/test_physics_organ.py``
+    # asserts they equal the payload constants once those land.
+    NURSERY_CAPACITY = 4
+    RESIDENCE_N = 4
+
 from .data import _action_rng, _episode_seed
 from .env import PhysicsEnv, WorldConfig
 from .micro_lewm import MicroLeWM
 
 __all__ = [
-    "AcceptanceTick",
-    "AcceptanceTrace",
+    "COHORT_KINDS",
+    "CandidateRecord",
+    "CandidateTable",
     "CollapseMandate",
+    "CohortRecord",
     "D4StandIn",
     "DigestResult",
     "DigestThresholds",
     "DigestedDebris",
     "EvidenceBudget",
     "FitRecord",
+    "NurseryTick",
+    "NurseryTrace",
     "Observation",
     "OverlayRecord",
     "OverlayTable",
     "Phase3Stats",
     "PhysicsOrgan",
     "PredictorOverlay",
-    "ProposalDecision",
     "RatchetResult",
-    "RejectionRecord",
     "ResidualDigester",
     "StructuralMotif",
-    "ValidationProposal",
     "derive_thresholds",
 ]
 
@@ -131,6 +181,19 @@ DEFAULT_LATENT_DIM = 64
 #: ``MOTIF_MIN_PERSISTENCE`` is *probe-derived*: forward-generalising patches
 #: appear at >= 10 post-flip ticks of banked support (measured in the design
 #: memo), so adoption waits for that depth.
+#:
+#: **Measured reachability (Round 11 wave 3, registered single-stream
+#: scenario, 36 ticks).**  Seed 7: 6 ingest ticks (12, 19, 25, 28, 29, 30),
+#: longest support streak 1, largest body count 2.  Seed 0: 5 ingest ticks
+#: (9, 10, 11, 12, 14), longest support streak 2, largest body count 3.
+#: Both motif gates are therefore unreachable on one stream (persistence 10,
+#: count 4), and the run produces **no motif cohort at all**: the ``#21`` ->
+#: ``#24`` live-overlay path does not fire.  The gate was derived on a
+#: multi-stream bank, so this is a *reported limitation* of the
+#: single-stream regime, not a tuned constant: both values are unchanged and
+#: no threshold is relaxed to make the path reachable.  The end-to-end
+#: lifecycle is demonstrated by the 16-stream
+#: :meth:`PhysicsOrgan.nursery_scenario` probe (POST-HOC PROBE / NOT A GATE).
 DEBRIS_CAPACITY = 8
 OVERLAY_CAPACITY = 4
 MOTIF_MIN_COUNT = 4
@@ -146,6 +209,13 @@ DEFAULT_PATCH = "head"
 DEFAULT_FIT_STEPS = 40
 DEFAULT_FIT_LR = 1e-3
 DEFAULT_CACHE_LEN = 64
+#: Round 11: the default number of trailing real transitions a candidate fit
+#: sees (the same window the round-9a proposal used).
+DEFAULT_FIT_WINDOW = 16
+#: The four D3 cohort classes (#19).  Same names as
+#: ``amateur.payloads.COHORT_KINDS`` (one string vocabulary, two modules: the
+#: organ produces the tags, the payload layer transports them).
+COHORT_KINDS = ("motif", "scaffold", "trail", "residual")
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +284,8 @@ class DigestThresholds:
     stale_after: int = STALE_AFTER
     cooldown_ticks: int = COOLDOWN_TICKS
     motif_streak_gap: int = MOTIF_STREAK_GAP
+    nursery_capacity: int = NURSERY_CAPACITY
+    residence_n: int = RESIDENCE_N
 
     def __post_init__(self) -> None:
         if self.debris_capacity < 2:
@@ -224,6 +296,10 @@ class DigestThresholds:
             raise ValueError("motif gates must be positive")
         if self.stale_patience < 1 or self.stale_after < 0:
             raise ValueError("stale gates out of range")
+        if self.nursery_capacity < 1:
+            raise ValueError("nursery_capacity must be >= 1")
+        if self.residence_n < 1:
+            raise ValueError("residence_n must be >= 1")
 
 
 def derive_thresholds(stats: Phase3Stats) -> DigestThresholds:
@@ -342,6 +418,58 @@ class StructuralMotif:
 
 
 @dataclass(frozen=True)
+class CohortRecord:
+    """One tagged digest item (a D3 cohort, #19).
+
+    Round 11 tags every digest item into exactly one of :data:`COHORT_KINDS`:
+
+    ``motif``
+        the assigned body is **stable** this tick (persistence, count, spread
+        and drift inside the existing :meth:`ResidualDigester._motif_for`
+        gates) -- the rule the ratchet mines (#21).
+    ``residual``
+        the assigned body is not yet stable -- raw debris (#27's residual
+        drain, plus expired cohorts).
+    ``scaffold``
+        a structure **consumed** this tick: a merge source from
+        :meth:`ResidualDigester._merge_pair` or a capacity victim from
+        :meth:`ResidualDigester._evict_least_supported` -- the support
+        machinery P4 recycles (#20).
+    ``trail``
+        the per-tick assignment trace: the mean assigned residual and the
+        number of assignments this tick -- the routing trail (#26).
+
+    A cohort is an **issuance**, not a store record: depositing the same body
+    on two ticks mints two cohorts.  ``cohort_id`` is deterministic and
+    unique per ``(kind, body, tick)`` (the emitting stream is part of the id
+    so a bank probe cannot collide).
+    """
+
+    cohort_id: str
+    kind: str
+    centroid: np.ndarray
+    count: int
+    spread: float
+    first_tick: int
+    last_tick: int
+    peak_surprise: float
+    #: The D3 body this issuance came from ('' for the trail cohort).
+    body_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.kind not in COHORT_KINDS:
+            raise ValueError(f"unknown cohort kind {self.kind!r}")
+        if not self.cohort_id:
+            raise ValueError("cohort_id must be non-empty")
+        if self.centroid.ndim != 1:
+            raise ValueError("cohort centroid must be (D,)")
+        if self.count < 1:
+            raise ValueError("cohort count must be positive")
+        if self.spread < 0.0:
+            raise ValueError("cohort spread must be non-negative")
+
+
+@dataclass(frozen=True)
 class CollapseMandate:
     """Ceiling pressure (#17): the bounded pool had to collapse."""
 
@@ -367,6 +495,9 @@ class DigestResult:
     motif: StructuralMotif | None
     mandate: CollapseMandate | None
     pool: tuple[DigestedDebris, ...]
+    #: Round 11 (#19): the tagged cohort items this tick digested.  Empty on
+    #: a non-ingest tick (the source then emits the ``noop_debris`` sentinel).
+    cohorts: tuple[CohortRecord, ...] = ()
 
 
 # --------------------------------------------------------------------------
@@ -428,6 +559,12 @@ class ResidualDigester:
     enough to be the same phenomenon) or evicts the least-supported body,
     then admits the new body.  A :class:`CollapseMandate` is emitted whenever
     a ceiling collapse happened, naming the freed body.
+
+    Round 11: every ingest tick also produces **tagged cohorts**
+    (:class:`CohortRecord`) in ``DigestResult.cohorts`` -- the assignment as
+    a ``motif`` or ``residual`` cohort, every structure consumed this tick as
+    a ``scaffold`` cohort, and the routing trail as a ``trail`` cohort.  A
+    non-ingest tick produces no cohorts (the source emits the #19 no-op).
     """
 
     def __init__(self, thresholds: DigestThresholds | None = None) -> None:
@@ -439,6 +576,9 @@ class ResidualDigester:
         self.merges = 0
         self.evictions = 0
         self.mandates = 0
+        #: Structures consumed by the *current* observe call (merge sources
+        #: and capacity evictions): the scaffold cohort source.
+        self._consumed: list[DigestedDebris] = []
 
     # ------------------------------------------------------------- helpers
     def _new_id(self) -> str:
@@ -485,6 +625,11 @@ class ResidualDigester:
             streak_first_centroid=source.streak_first_centroid,
             last_support_tick=max(a.last_support_tick, b.last_support_tick),
         )
+        # Round 11: both merge sources are structures consumed this tick;
+        # they become the scaffold cohort (snapshot before the survivor is
+        # mutated again by a later merge in the same observe pass).
+        self._consumed.append(a.snapshot())
+        self._consumed.append(b.snapshot())
         del self._bodies[b.debris_id]
         self._bodies[a.debris_id] = merged
         self.merges += 1
@@ -518,6 +663,7 @@ class ResidualDigester:
             self._bodies.values(),
             key=lambda body: (body.count, -body.last_tick, body.debris_id),
         )
+        self._consumed.append(victim.snapshot())
         del self._bodies[victim.debris_id]
         self.evictions += 1
         return victim
@@ -571,6 +717,7 @@ class ResidualDigester:
             )
 
         self.ingested += 1
+        self._consumed = []
         created: DigestedDebris | None = None
         merged: list[DigestedDebris] = []
         evicted: list[DigestedDebris] = []
@@ -614,10 +761,28 @@ class ResidualDigester:
             assigned = new_id
             created = body.snapshot()
 
+        # The assignment-time snapshot: if compaction folds this body into
+        # another, the tick's assignment must still be issued as a cohort
+        # (a digest item is never silently lost).
+        assigned_body = None if assigned is None else self._bodies.get(assigned)
+        assigned_snapshot = (
+            None if assigned_body is None else assigned_body.snapshot()
+        )
         merged.extend(self._compact(thresholds.merge_radius / 2.0))
         motif = self._motif_for(assigned)
         if mandate is not None:
             mandate = replace(mandate, active_bodies=len(self._bodies))
+        cohorts = self._cohorts(
+            tick=tick,
+            stream=int(observation.stream),
+            assigned=assigned,
+            assigned_snapshot=assigned_snapshot,
+            motif=motif,
+            consumed=self._consumed,
+            residual=residual,
+            surprise=float(surprise),
+        )
+        self._consumed = []
         return DigestResult(
             observation=observation,
             tick=tick,
@@ -629,7 +794,88 @@ class ResidualDigester:
             motif=motif,
             mandate=mandate,
             pool=self.snapshot(),
+            cohorts=cohorts,
         )
+
+    def _cohorts(
+        self,
+        *,
+        tick: int,
+        stream: int,
+        assigned: str | None,
+        assigned_snapshot: DigestedDebris | None,
+        motif: StructuralMotif | None,
+        consumed: Sequence[DigestedDebris],
+        residual: np.ndarray,
+        surprise: float,
+    ) -> tuple[CohortRecord, ...]:
+        """Tag this observation's digest items into the four cohort classes.
+
+        Rules (Round 11, contract §3.3):
+
+        * ``motif`` when the assigned body is stable this tick (the same
+          :meth:`_motif_for` gates the ratchet mines), else ``residual``;
+        * one ``scaffold`` per structure consumed this tick (merge sources
+          and capacity victims), in consumption order;
+        * one ``trail`` for the routing trace: the assigned residual and the
+          number of assignments recorded by this observation (exactly one,
+          because a digest is one observation; the single-stream run has one
+          observation per tick, so this is the tick's assignment trace).
+
+        Ids are deterministic and unique per ``(kind, body, tick)``.  The
+        ``-s<stream>`` and ``-<i>`` suffixes make them unique when several
+        streams support the same tick and when one body is consumed twice in
+        the same observe pass (a merge survivor that is merged again).
+        """
+        out: list[CohortRecord] = []
+        body = None if assigned is None else self._bodies.get(assigned)
+        snapshot = assigned_snapshot if body is None else body.snapshot()
+        if snapshot is not None:
+            kind = "motif" if motif is not None else "residual"
+            out.append(
+                CohortRecord(
+                    cohort_id=f"{kind}-{snapshot.debris_id}-s{stream}-{tick:04d}",
+                    kind=kind,
+                    centroid=snapshot.centroid,
+                    count=snapshot.count,
+                    spread=snapshot.spread,
+                    first_tick=snapshot.first_tick,
+                    last_tick=snapshot.last_tick,
+                    peak_surprise=snapshot.peak_surprise,
+                    body_id=snapshot.debris_id,
+                )
+            )
+        else:  # pragma: no cover - an ingest tick always has an assignment
+            raise AssertionError("an ingested tick must have an assigned body")
+        for index, victim in enumerate(consumed):
+            out.append(
+                CohortRecord(
+                    cohort_id=(
+                        f"scaffold-{victim.debris_id}-s{stream}-{tick:04d}-{index:02d}"
+                    ),
+                    kind="scaffold",
+                    centroid=victim.centroid,
+                    count=victim.count,
+                    spread=victim.spread,
+                    first_tick=victim.first_tick,
+                    last_tick=victim.last_tick,
+                    peak_surprise=victim.peak_surprise,
+                    body_id=victim.debris_id,
+                )
+            )
+        out.append(
+            CohortRecord(
+                cohort_id=f"trail-s{stream}-{tick:04d}",
+                kind="trail",
+                centroid=np.asarray(residual, dtype=np.float64),
+                count=1,
+                spread=0.0,
+                first_tick=tick,
+                last_tick=tick,
+                peak_surprise=float(surprise),
+            )
+        )
+        return tuple(out)
 
     def _motif_for(self, debris_id: str | None) -> StructuralMotif | None:
         if debris_id is None:
@@ -746,16 +992,22 @@ class PredictorOverlay:
         """The dense ``(latent_dim, head_in)`` weight delta (apply time only)."""
         return torch.matmul(self.u, self.v.t())
 
-    def apply_to(self, model: MicroLeWM) -> None:
-        """Add the materialised patch to ``model.predictor.head.2`` (no grad).
+    def apply_to_predictor(self, predictor: Any) -> None:
+        """Add the materialised patch to ``predictor.head.2`` (no grad).
 
         Only the last head layer is touched: the norm, ``head.0``, the GRU
-        and every encoder parameter are left bit-identical.
+        are left bit-identical.  Round 11 shadow scoring applies a patch to a
+        standalone copy of the **predictor** only, so the encoder is not even
+        copied (and provably cannot be touched).
         """
-        head = model.predictor.head[-1]
+        head = predictor.head[-1]
         with torch.no_grad():
             head.weight.add_(self.materialise().to(head.weight.dtype))
             head.bias.add_(self.bias.to(head.bias.dtype))
+
+    def apply_to(self, model: MicroLeWM) -> None:
+        """Add the materialised patch to ``model.predictor.head.2`` (no grad)."""
+        self.apply_to_predictor(model.predictor)
 
 
 @dataclass(frozen=True)
@@ -767,9 +1019,11 @@ class FitRecord:
     no tensor after an eviction (Q1-A "no organ-side retention").
 
     ``reason`` is empty for an admitted fit and one of ``capacity`` /
-    ``no-evidence`` / ``no-improvement`` / ``cooldown`` for a refusal.  A
-    refusal is **recorded**, never silent, and carries the evidence budget
-    it was judged against (Round 9a).
+    ``no-evidence`` / ``no-improvement`` for a refusal.  A refusal is
+    **recorded**, never silent, and carries the evidence budget it was
+    judged against (Round 9a).  (Round 11 dropped the ``cooldown`` reason:
+    the cooldown now gates :meth:`PhysicsOrgan.adopt_motif`, which returns
+    ``None`` without attempting a fit -- there is no fit to refuse.)
     """
 
     overlay_id: str
@@ -789,73 +1043,6 @@ class FitRecord:
 
 
 @dataclass(frozen=True)
-class ValidationProposal:
-    """A fitted candidate awaiting held-out validation (Round 9a).
-
-    The candidate is fitted on real transitions **ending at
-    ``proposal_tick``** (``fit_last_tick == proposal_tick``) and is not
-    born or activated by :meth:`PhysicsOrgan.propose_overlay_from_buffer`.
-    It is validated on the next ``validation_window`` observations of the
-    same stream whose frame tick is strictly greater than
-    ``fit_last_tick``; the paired candidate-vs-base surprise on each such
-    transition is accumulated, and the birth decision is taken at the tick
-    the window completes.
-    """
-
-    proposal_id: str
-    stream: int
-    proposal_tick: int
-    fit_first_tick: int
-    fit_last_tick: int
-    fit_window: int
-    validation_window: int
-    motif_id: str
-    budget: EvidenceBudget
-    candidate: PredictorOverlay
-
-
-@dataclass(frozen=True)
-class RejectionRecord:
-    """One public, test-readable pre-adoption rejection.
-
-    ``reason`` is ``"interference"`` for a candidate that lost the paired
-    held-out comparison; the record carries the measured means and the
-    evidence budget the candidate was fitted under, so the refusal can be
-    audited without re-running the fit.
-    """
-
-    tick: int
-    reason: str
-    budget: EvidenceBudget | None
-    candidate_mean: float
-    base_mean: float
-    n: int
-
-
-@dataclass(frozen=True)
-class ProposalDecision:
-    """One resolved pre-adoption proposal (birth or interference rejection).
-
-    Records the measured held-out means and the evidence budget even on the
-    birth path, so the decision is auditable from the decision log alone
-    (the rejection log is the ``outcome != "birth"`` view of this list).
-    """
-
-    tick: int
-    proposal_id: str
-    proposal_tick: int
-    outcome: str
-    candidate_mean: float
-    base_mean: float
-    n: int
-    validation_ticks: tuple[int, ...]
-    rank: int
-    param_count: int
-    capacity: int
-    budget_n: int
-
-
-@dataclass(frozen=True)
 class OverlayRecord:
     """One D2-shaped overlay record: ``(epoch, overlay_id, status)`` plus
     the lifecycle bookkeeping the executor needs for gating."""
@@ -869,7 +1056,14 @@ class OverlayRecord:
     stale_tick: int | None = None
 
     def token(self) -> tuple[int, str, str]:
-        """The exact payload triple the D2 mat carries (#23/#24/#25)."""
+        """The ``(epoch, overlay_id, status)`` record the D2 overlay index holds.
+
+        Round 11 per-flow pins: ``#24`` writes this record (``active``), ``#8``
+        reads the active head, ``#25`` reads the head labelled ``stale``.
+        ``#23`` does **not** carry this type -- it carries the nursery
+        survivor (``SurvivingCrystalBody``), which is a read-time selection
+        over candidate records, not a D2 overlay record.
+        """
         return (self.epoch, self.overlay_id, self.status)
 
 
@@ -1067,14 +1261,263 @@ class RatchetResult:
 
 
 # --------------------------------------------------------------------------
+# Round 11 (E): the D2 nursery -- candidates carry the patch, never steer it
+# --------------------------------------------------------------------------
+@dataclass
+class CandidateRecord:
+    """One resident D2 nursery record: the shadow patch and its evidence.
+
+    ``overlay`` is the candidate's **substance**: a capacity-bounded
+    low-rank predictor patch.  It is never applied to the live model; it is
+    applied to a shadow copy of the predictor by
+    :meth:`PhysicsOrgan.shadow_scores`, which accumulates ``evidence`` as
+    ``(tick, adapted, base)`` -- one paired measurement per resident tick.
+
+    ``ratio = adapted_mean / base_mean`` is the residence evidence
+    ``#23``/``#22`` read (candidate ``qualified`` iff ``ticks >=
+    RESIDENCE_N`` and ``ratio < 1.0``).
+    """
+
+    candidate_id: str
+    overlay: PredictorOverlay
+    born_tick: int
+    evidence: list[tuple[int, float, float]] = field(default_factory=list)
+    promoted: bool = False
+    closed_tick: int | None = None
+    cause: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.candidate_id:
+            raise ValueError("candidate_id must be non-empty")
+        if self.overlay.overlay_id != self.candidate_id:
+            raise ValueError(
+                "the candidate's patch must be keyed by the candidate id "
+                f"({self.overlay.overlay_id!r} != {self.candidate_id!r})"
+            )
+
+    # ------------------------------------------------------------- evidence
+    @property
+    def residence_ticks(self) -> int:
+        return len(self.evidence)
+
+    @property
+    def adapted_mean(self) -> float:
+        if not self.evidence:
+            return float("nan")
+        return float(np.mean([sample[1] for sample in self.evidence]))
+
+    @property
+    def base_mean(self) -> float:
+        if not self.evidence:
+            return float("nan")
+        return float(np.mean([sample[2] for sample in self.evidence]))
+
+    @property
+    def ratio(self) -> float:
+        """``adapted_mean / base_mean``; ``inf`` when there is no valid base."""
+        base = self.base_mean
+        if not np.isfinite(base) or base <= 0.0:
+            return float("inf")
+        return float(self.adapted_mean / base)
+
+    def qualified(self, residence_n: int = RESIDENCE_N) -> bool:
+        """The #23 selection predicate: enough residence time and a real win."""
+        ratio = self.ratio
+        return (
+            self.residence_ticks >= int(residence_n)
+            and np.isfinite(ratio)
+            and ratio < 1.0
+        )
+
+    def summary(self) -> dict[str, Any]:
+        """The residence-evidence row (the pre-registered §15.11 curve)."""
+        return {
+            "candidate_id": self.candidate_id,
+            "born_tick": int(self.born_tick),
+            "residence_ticks": int(self.residence_ticks),
+            "adapted_mean": float(self.adapted_mean),
+            "base_mean": float(self.base_mean),
+            "ratio": float(self.ratio),
+            "qualified": bool(self.qualified()),
+        }
+
+
+@dataclass(frozen=True)
+class PromotionRecord:
+    """One candidate promotion (#22 lineage consumption), with its evidence.
+
+    ``ratio`` is the candidate's **final** residence ratio at the moment of
+    promotion -- the value the Round-11 ADMISSION gate reads (a promoted
+    candidate with ``ratio >= 1.0`` is a wiring defect, not a tuning
+    opportunity).
+    """
+
+    candidate_id: str
+    born_tick: int
+    promoted_tick: int
+    residence_ticks: int
+    adapted_mean: float
+    base_mean: float
+    ratio: float
+    qualified: bool
+
+
+class CandidateTable:
+    """Bounded D2 nursery: ``candidate_id -> CandidateRecord`` (capacity 4).
+
+    The organ owns the operative candidate patch; the store (``MatBoard``,
+    ``amateur/payloads.py``) owns the accounting mirror.  The table mirrors
+    the store's candidate index policy exactly: FIFO capacity eviction,
+    ``nursery_observe`` bookkeeping only for **resident** ids (an unknown id
+    is a loud failure), promote/retire remove the record and its patch
+    together, and ``prune_to`` aligns the organ with the store's residents.
+
+    Every mutation raises on illegal input; there are no silent no-ops.
+    """
+
+    def __init__(self, capacity: int = NURSERY_CAPACITY) -> None:
+        if int(capacity) < 1:
+            raise ValueError("capacity must be >= 1")
+        self.capacity = int(capacity)
+        self._records: dict[str, CandidateRecord] = {}
+        #: ``(candidate_id, born_tick, close_tick, cause)`` -- the eviction log.
+        self.evictions: list[tuple[str, int, int, str]] = []
+        #: The promotion log (the ADMISSION gate's evidence).
+        self.promotions: list[PromotionRecord] = []
+
+    # ------------------------------------------------------------- mutations
+    def birth(self, record: CandidateRecord) -> CandidateRecord:
+        if record.candidate_id in self._records:
+            raise ValueError(f"candidate {record.candidate_id!r} already resident")
+        while len(self._records) >= self.capacity:
+            oldest = next(iter(self._records.values()))
+            self._close(oldest.candidate_id, record.born_tick, "capacity")
+        self._records[record.candidate_id] = record
+        return record
+
+    def observe(self, candidate_id: str, tick: int, adapted: float, base: float) -> None:
+        """Append one shadow measurement to a **resident** candidate."""
+        record = self.require(candidate_id)
+        adapted = float(adapted)
+        base = float(base)
+        if not (np.isfinite(adapted) and np.isfinite(base)):
+            raise ValueError("shadow scores must be finite")
+        record.evidence.append((int(tick), adapted, base))
+
+    def retire(self, candidate_id: str, tick: int) -> CandidateRecord:
+        return self._close(candidate_id, tick, "retired")
+
+    def promote(self, candidate_id: str, tick: int) -> PromotionRecord:
+        """Promote a resident candidate: log the evidence, remove record+patch."""
+        record = self.require(candidate_id)
+        if record.promoted:  # pragma: no cover - promotion removes the record
+            raise ValueError(f"candidate {candidate_id!r} was already promoted")
+        record.promoted = True
+        promotion = PromotionRecord(
+            candidate_id=candidate_id,
+            born_tick=int(record.born_tick),
+            promoted_tick=int(tick),
+            residence_ticks=int(record.residence_ticks),
+            adapted_mean=float(record.adapted_mean),
+            base_mean=float(record.base_mean),
+            ratio=float(record.ratio),
+            qualified=bool(record.qualified()),
+        )
+        self.promotions.append(promotion)
+        self._close(candidate_id, tick, "promoted")
+        return promotion
+
+    def prune_to(self, resident_ids: "set[str] | frozenset[str]") -> tuple[CandidateRecord, ...]:
+        """Drop records the store no longer holds (the Q1-A one-way prune)."""
+        removed = [
+            record
+            for name, record in self._records.items()
+            if name not in resident_ids
+        ]
+        for record in removed:
+            self._close(record.candidate_id, record.born_tick, "pruned")
+        return tuple(removed)
+
+    def reset(self) -> None:
+        """Clear records and both logs (a fresh nursery)."""
+        self._records.clear()
+        self.evictions.clear()
+        self.promotions.clear()
+
+    def _close(self, candidate_id: str, tick: int, cause: str) -> CandidateRecord:
+        record = self._records.pop(candidate_id)
+        record.closed_tick = int(tick)
+        record.cause = str(cause)
+        self.evictions.append((candidate_id, int(record.born_tick), int(tick), str(cause)))
+        return record
+
+    # ----------------------------------------------------------------- reads
+    def require(self, candidate_id: str) -> CandidateRecord:
+        record = self._records.get(str(candidate_id))
+        if record is None:
+            raise KeyError(f"no resident candidate {candidate_id!r}")
+        return record
+
+    def record(self, candidate_id: str) -> CandidateRecord | None:
+        return self._records.get(str(candidate_id))
+
+    def ids(self) -> tuple[str, ...]:
+        return tuple(self._records)
+
+    def resident(self) -> tuple[CandidateRecord, ...]:
+        """Resident records, oldest birth first (insertion order)."""
+        return tuple(self._records.values())
+
+    def patch(self, candidate_id: str) -> PredictorOverlay | None:
+        record = self._records.get(str(candidate_id))
+        return None if record is None else record.overlay
+
+    def evidence(self, candidate_id: str) -> tuple[tuple[int, float, float], ...]:
+        return tuple(self.require(candidate_id).evidence)
+
+    def survivor(self) -> CandidateRecord | None:
+        """The #23 selection: lowest ratio, **no** ``qualified`` pre-filter.
+
+        Mirrors ``MatBoard.nursery_survivor`` exactly (contract §1.9): among
+        residents with ``residence_ticks >= RESIDENCE_N`` and a finite
+        positive base mean, the lowest ratio wins with the oldest birth as
+        tie-break; a harmful candidate (``ratio >= 1``) is returned too, with
+        ``qualified() is False``.  ``None`` iff no resident has enough
+        residence.  Surfacing the harmful case is what makes the ``#22``
+        refusal and the ADMISSION metric non-vacuous.
+        """
+        best: CandidateRecord | None = None
+        for record in self._records.values():
+            if record.residence_ticks < RESIDENCE_N:
+                continue
+            base = record.base_mean
+            if not np.isfinite(base) or base <= 0.0:
+                continue
+            if best is None or record.ratio < best.ratio:
+                best = record
+        return best
+
+    def promotion(self, candidate_id: str) -> PromotionRecord | None:
+        for promotion in reversed(self.promotions):
+            if promotion.candidate_id == str(candidate_id):
+                return promotion
+        return None
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+
+# --------------------------------------------------------------------------
 # D4 stand-in (Base Core): the acceptance gate is that it gets zero writes
 # --------------------------------------------------------------------------
 class D4StandIn:
     """Stand-in for D4 Base Core; counts every attempted write.
 
-    The physics organ never calls :meth:`write` -- the acceptance scenario
-    asserts ``writes == 0``.  The ledger's #22 sediment edge is out of scope
-    for this slice; overlays live on D2 / in the side table.
+    The organ never calls :meth:`write`: in Round 11 the ``#22`` sediment is
+    produced by the **executor** source from the ``#23`` survivor read
+    (:meth:`PhysicsOrgan.residence_evidence` /
+    :meth:`PhysicsOrgan.survivor`), not by the organ, so the organ-level
+    probes assert ``writes == 0``.  A live overlay can never write D4.
     """
 
     def __init__(self) -> None:
@@ -1101,6 +1544,7 @@ class _StreamState:
         "actions",
         "cache_start",
         "seed",
+        "transitions",
     )
 
     def __init__(self, frame_size: int, seed: int | None) -> None:
@@ -1114,31 +1558,42 @@ class _StreamState:
         self.actions: deque[int] = deque()
         self.cache_start = 0
         self.seed = seed
+        #: ``(frame_tick, prev_latent, action, hidden_before, latent)`` for the
+        #: last ``cache_len`` transitions: the shadow-scoring probe needs the
+        #: exact GRU input state each prediction used (Round 11, E).
+        self.transitions: deque[
+            tuple[int, torch.Tensor, int, torch.Tensor | None, torch.Tensor]
+        ] = deque()
 
     def trim_cache(self, cache_len: int) -> None:
         while len(self.actions) > cache_len:
             self.actions.popleft()
             self.latents.popleft()
             self.cache_start += 1
+        while len(self.transitions) > cache_len:
+            self.transitions.popleft()
 
 
 # --------------------------------------------------------------------------
 # The organ
 # --------------------------------------------------------------------------
 class PhysicsOrgan:
-    """E1 + frozen-encoder micro-LeWM + P5 digest + P6 ratchet.
+    """E1 + frozen-encoder micro-LeWM + P5 tagged digest + P6 nursery/ratchet.
 
-    Public API (the executor wiring surface)::
+    Public API (the executor wiring surface, Round 11)::
 
         organ = PhysicsOrgan(checkpoint_path)
         obs = organ.reset(seed=7)                 # E1 reset, first frame
         obs = organ.step(action)                  # E1 step + observation
-        digest = organ.digest(obs)                # P5
-        ratchet = organ.ratchet(digest)           # P6
-        # or, in one call: obs, digest, ratchet = organ.tick(action)
+        digest = organ.digest(obs)                # P5 (tagged cohorts)
+        candidate = organ.birth_candidate(tick)   # #18 (fit, never apply)
+        shadow = organ.shadow_scores(tick)        # residence evidence
+        record = organ.adopt_motif(motif, tick)   # #21 -> #24 (live patch)
+        ratchet = organ.ratchet(digest)           # P6 staleness/eviction
 
     The same methods take ``stream=<int>`` for a bank of independent
-    streams; digest and ratchet state are shared (one organ = one world).
+    streams; digest, nursery and ratchet state are shared (one organ = one
+    world).
     """
 
     def __init__(
@@ -1203,28 +1658,21 @@ class PhysicsOrgan:
         self._stale_run = 0
         self._decided_tick = -1
         self._pending: dict[int, list[DigestResult]] = {}
-        #: Published #22 gate verdict (adapted_mean, base_mean), or None.
-        self._gate_evidence: tuple[float, float] | None = None
-        self._gate_adapted_sum = 0.0
-        self._gate_base_sum = 0.0
-        self._gate_evidence_ticks = 0
         self.history: list[RatchetResult] = []
         self.observations: list[Observation] = []
         self.fit_history: list[FitRecord] = []
-        #: Round 9a: pre-adoption validation state (fitted candidate, the
-        #: paired evidence accumulated so far, and the public decision log).
-        self._proposal: ValidationProposal | None = None
-        self._proposal_serial = 0
-        self._validation_candidate_sum = 0.0
-        self._validation_base_sum = 0.0
-        self._validation_ticks: list[int] = []
-        self.proposals: list[ValidationProposal] = []
-        self.rejections: list[RejectionRecord] = []
-        self.decisions: list[ProposalDecision] = []
         self.refusals: list[dict[str, Any]] = []
-        #: The budget of the most recent fit attempt (diagnostic; also read by
-        #: ``propose_overlay_from_buffer`` to attach it to the proposal).
+        #: The budget of the most recent fit attempt (diagnostic).
         self.last_budget: EvidenceBudget | None = None
+        # ---- Round 11 (E): the D2 nursery, organ-side ---------------------
+        #: Candidate records + evidence (the store's ``MatBoard`` nursery
+        #: index is the accounting mirror).
+        self.nursery = CandidateTable(self.thresholds.nursery_capacity)
+        self._candidate_serial = 0
+        #: One shadow predictor copy per resident candidate, built at birth
+        #: with the candidate's patch applied.  It is a copy of the **base
+        #: predictor** and is never the live model.
+        self._shadow_predictors: dict[str, Any] = {}
 
     # ------------------------------------------------------------ internals
     def _snapshot_encoder(self) -> None:
@@ -1277,6 +1725,9 @@ class PhysicsOrgan:
         state.window.clear()
         state.latents.clear()
         state.actions.clear()
+        # The shadow-scoring probe belongs to the stream too: a restart must
+        # not let a later score replay a transition from the previous episode.
+        state.transitions.clear()
         state.cache_start = 0
         state.seed = seed
         return self._observe(frame, None, stream=stream, ingest=ingest)
@@ -1365,20 +1816,21 @@ class PhysicsOrgan:
             base_surprise = float(
                 torch.mean(base_error * base_error).detach()
             )
-            if (
-                self._proposal is not None
-                and int(stream) == self._proposal.stream
-            ):
-                # Round 9a: paired candidate-vs-base surprise on this
-                # held-out transition, before any adoption decision.
-                self._accrue_validation(
-                    frame_tick=state.tick,
-                    prev_latent=state.prev_latent,
-                    action=int(action),
-                    hidden=hidden_before,
-                    latent=latent,
-                    base_surprise=base_surprise,
+            # Round 11 (E): keep the exact probe a shadow score needs -- the
+            # previous latent, the action, the GRU hidden state *before* this
+            # step and the observed latent.  Shadow scoring replays this
+            # transition on a copy of the predictor; the live model is never
+            # touched.  Head-only patches leave the GRU untouched, so this
+            # hidden state is valid for the base predictor too.
+            state.transitions.append(
+                (
+                    int(state.tick),
+                    state.prev_latent,
+                    int(action),
+                    hidden_before,
+                    latent,
                 )
+            )
         elif self._active_adapter is None:
             base_surprise = surprise
         if state.prev_latent is not None:
@@ -1498,6 +1950,20 @@ class PhysicsOrgan:
     ) -> tuple[
         list[OverlayRecord], list[OverlayRecord], list[OverlayRecord], list[OverlayRecord]
     ]:
+        """Finalise one tick of the **live-overlay** lifecycle (P6).
+
+        Round 11 (ruling C) narrowed this pass to what staleness genuinely
+        needs.  Adoption is no longer decided here: the live patch arrives
+        only through ``#24``, from a ``#21`` motif cohort, via
+        :meth:`adopt_motif`.  The live overlay no longer produces ``#22``
+        evidence either -- D4 is reached only by a candidate surfaced by
+        ``#23`` (see :meth:`residence_evidence`).  What remains is the
+        staleness rule: a live patch that stops improving on the residual it
+        has to correct (the base-predictor error is smaller for
+        ``stale_patience`` consecutive ticks) is marked stale, deactivated
+        and cooled down; a patch that is still improving on a quiet stream
+        is revalidated (epoch advances).
+        """
         births: list[OverlayRecord] = []
         revalidations: list[OverlayRecord] = []
         stales: list[OverlayRecord] = []
@@ -1517,22 +1983,6 @@ class PhysicsOrgan:
                 if np.isfinite(result.observation.base_surprise)
             ]
             mean_base = float(np.mean(base_surprises)) if base_surprises else float("nan")
-            # Gate evidence counts only ticks in which the patch was actually
-            # applied to the prediction (``observation.overlay_id``); the
-            # adoption tick's observation predates the patch and carries no
-            # usefulness verdict.
-            applied = [
-                result.observation
-                for result in digests
-                if result.observation.overlay_id == active_id
-                and np.isfinite(result.observation.surprise)
-                and np.isfinite(result.observation.base_surprise)
-            ]
-            if applied:
-                self._accrue_gate_evidence(
-                    float(np.mean([observation.surprise for observation in applied])),
-                    float(np.mean([observation.base_surprise for observation in applied])),
-                )
             # Stale when the patch stops improving on what it has to correct:
             # the base-predictor residual is smaller than the patched one.
             hurts = (
@@ -1554,36 +2004,99 @@ class PhysicsOrgan:
                 and mean_surprise <= self.thresholds.debris_threshold
             ):
                 revalidations.append(self.overlay_table.revalidate(active_id, tick))
-        else:
-            motif = self._best_motif(digests)
-            if motif is not None and tick >= self._cooldown_until:
-                record = self._adopt_or_revalidate(motif, tick)
-                if record is not None:
-                    if record.birth_tick == tick and record.epoch == 1:
-                        births.append(record)
-                    else:
-                        revalidations.append(record)
         evictions = list(self.overlay_table.evict_due(tick))
         return births, revalidations, stales, evictions
 
+    # ------------------------------------------------- motif path (#21 -> #24)
     @staticmethod
-    def _best_motif(digests: Sequence[DigestResult]) -> StructuralMotif | None:
-        motifs = [result.motif for result in digests if result.motif is not None]
-        if not motifs:
-            return None
-        return max(motifs, key=lambda motif: (motif.persistence, motif.count))
+    def _as_structural_motif(motif: Any) -> StructuralMotif:
+        """Accept a :class:`StructuralMotif`, a motif :class:`CohortRecord`,
+        or a payload ``StructuralMotifBody`` (duck-typed) and normalise it.
 
-    def _adopt_or_revalidate(self, motif: StructuralMotif, tick: int) -> OverlayRecord | None:
-        existing = self.overlay_table.record_for_motif(motif.motif_id)
+        ``#21`` is an executor-derived D3 store read, so the source hands the
+        organ whatever body it read; the fit only needs the window
+        (``first_tick``/``last_tick``) and the lineage id.
+        """
+        if isinstance(motif, StructuralMotif):
+            return motif
+        if isinstance(motif, CohortRecord):
+            if motif.kind != "motif":
+                raise ValueError(
+                    f"adopt_motif needs a motif cohort, got {motif.kind!r}"
+                )
+            return StructuralMotif(
+                motif_id=motif.cohort_id,
+                debris_id=motif.body_id,
+                centroid=np.asarray(motif.centroid, dtype=np.float64),
+                count=int(motif.count),
+                spread=float(motif.spread),
+                persistence=max(1, int(motif.last_tick) - int(motif.first_tick) + 1),
+                drift=0.0,
+                first_tick=int(motif.first_tick),
+                last_tick=int(motif.last_tick),
+            )
+        motif_id = getattr(motif, "motif_id", None)
+        if not motif_id:
+            raise TypeError("adopt_motif needs a motif body with a motif_id")
+        centroid = getattr(motif, "centroid", None)
+        centroid = (
+            np.zeros(DEFAULT_LATENT_DIM, dtype=np.float64)
+            if centroid is None
+            else np.asarray(centroid, dtype=np.float64)
+        )
+        return StructuralMotif(
+            motif_id=str(motif_id),
+            debris_id=str(getattr(motif, "debris_id", "")),
+            centroid=centroid,
+            count=int(getattr(motif, "count", 1)),
+            spread=float(getattr(motif, "spread", 0.0)),
+            persistence=int(getattr(motif, "persistence", 1)),
+            drift=float(getattr(motif, "drift", 0.0)),
+            first_tick=int(getattr(motif, "first_tick", 0)),
+            last_tick=int(getattr(motif, "last_tick", 0)),
+        )
+
+    def adopt_motif(self, motif: Any, tick: int) -> OverlayRecord | None:
+        """Fit or revalidate the **live** patch from a ``#21`` motif cohort.
+
+        This is the only way a live patch arrives (Round 11 ruling C/E): the
+        executor reads the motif cohort out of D3 (``#21``) and the source
+        calls this method; a birth emits ``#24`` with
+        ``motif_lineage = motif_id``.  Semantics are the round-9a ratchet's,
+        unchanged:
+
+        * a motif that already maps to a record is **revalidated** (epoch
+          advances, status back to active) and re-activated;
+        * otherwise the overlay is fitted under the unchanged capacity bound
+          and **born** (epoch 1, active);
+        * nothing happens during the cooldown window (returns ``None``; the
+          source emits the ``#24`` no-op);
+        * the ratchet keeps **one active overlay**: while a *different*
+          overlay is active, a new motif is refused (returns ``None``) rather
+          than silently replacing it.  Staleness/eviction free the slot.
+
+        Returns the birth/revalidation record, or ``None``.
+        """
+        tick = int(tick)
+        structural = self._as_structural_motif(motif)
+        if tick < self._cooldown_until:
+            return None
+        existing = self.overlay_table.record_for_motif(structural.motif_id)
         if existing is not None:
             record = self.overlay_table.revalidate(existing.overlay_id, tick)
             self._set_active_overlay(existing.overlay_id)
+            self._stale_run = 0
             return record
-        overlay = self._fit_overlay(motif, tick)
+        if self._active_overlay_id is not None:
+            return None
+        overlay = self._fit_overlay(structural, tick)
         if overlay is None:
             return None
-        record = self.overlay_table.birth(overlay, motif_id=motif.motif_id, tick=tick)
+        record = self.overlay_table.birth(
+            overlay, motif_id=structural.motif_id, tick=tick
+        )
         self._set_active_overlay(record.overlay_id)
+        self._stale_run = 0
         return record
 
     # ------------------------------------------------------ executor surface
@@ -1598,158 +2111,40 @@ class PhysicsOrgan:
             self._set_active_overlay(None)
         return removed
 
-    def ratchet_gate_passed(self) -> tuple[bool, float]:
-        """The real #22 sediment gate, derived from stored P6 evidence (Q4).
-
-        The organ records adapted-vs-base surprise evidence on every
-        finalized tick in which the active overlay was actually applied to
-        the prediction.  The production recorder
-        (:meth:`_accrue_gate_evidence`) publishes cumulative means only
-        after ``stale_patience`` applied ticks -- the same patience the
-        staleness decision uses -- so one transient tick cannot sediment an
-        invariant.
-
-        The gate passes only when a verdict exists, an overlay is active,
-        and the cumulative adapted mean is strictly below the base mean; the
-        confidence is ``clamp(1 - adapted/base, 0, 1)``.  No verdict, no
-        active overlay, non-finite values, ``base <= 0``, or ``adapted >=
-        base`` all return ``(False, 0.0)``, and the source emits the
-        zero-confidence ``ratchet-gate-blocked`` body.
-        """
-        if self._gate_evidence is None or not self.overlay_table.active():
-            return False, 0.0
-        adapted, base = self._gate_evidence
-        if not (np.isfinite(adapted) and np.isfinite(base)) or base <= 0.0:
-            return False, 0.0
-        if adapted >= base:
-            return False, 0.0
-        return True, float(min(1.0, max(0.0, 1.0 - adapted / base)))
-
-    def _accrue_gate_evidence(self, adapted: float, base: float) -> None:
-        """Accumulate one applied-tick usefulness measurement (P6).
-
-        Publishes cumulative ``(adapted_mean, base_mean)`` once at least
-        ``stale_patience`` applied ticks have been recorded.  Non-finite or
-        degenerate measurements (``base <= 0``) carry no verdict and are
-        ignored rather than poisoning the evidence.
-        """
-        if not (np.isfinite(adapted) and np.isfinite(base)) or base <= 0.0:
-            return
-        self._gate_adapted_sum += float(adapted)
-        self._gate_base_sum += float(base)
-        self._gate_evidence_ticks += 1
-        if self._gate_evidence_ticks >= self.thresholds.stale_patience:
-            ticks = float(self._gate_evidence_ticks)
-            self._gate_evidence = (
-                self._gate_adapted_sum / ticks,
-                self._gate_base_sum / ticks,
-            )
-
-    def _record_gate_evidence(self, adapted: float, base: float) -> None:
-        """Publish a completed adapted-vs-base verdict directly.
-
-        Evidence-injection hook: the production path accrues per-tick
-        evidence and publishes after ``stale_patience`` applied ticks; this
-        method publishes a supplied verdict so the gate's branches can be
-        driven deterministically in isolation.  Round 9a's registered trace
-        also reaches the passing branch through the real accrual path (the
-        validation-gated patch is beneficial while active -- see
-        ``test_d4_sediments_are_the_real_gate_output``), so this hook is a
-        convenience, not the only route.
-        """
-        adapted = float(adapted)
-        base = float(base)
-        if not (np.isfinite(adapted) and np.isfinite(base)) or base <= 0.0:
-            raise ValueError("gate evidence must be finite with base > 0")
-        self._gate_adapted_sum = adapted
-        self._gate_base_sum = base
-        self._gate_evidence_ticks = max(1, int(self.thresholds.stale_patience))
-        self._gate_evidence = (adapted, base)
-
-    def reset_p6_state(self) -> None:
-        """Clear all P6 decision state, lifecycle table and fit artifacts.
-
-        Called by ``PhysicsRun.__init__`` and ``PhysicsRun.reset`` so a
-        second run on the same organ is a fresh experiment: no pending
-        decisions, cooldown, stale run, gate evidence, overlay
-        records/patches or fit history survive.  E1 (environment/streams)
-        and the frozen base model are untouched; the working model is
-        restored to the base copy.
-        """
-        self._active_overlay_id = None
-        self._active_adapter = None
-        self._overlay_serial = 0
-        self._cooldown_until = -1
-        self._stale_run = 0
-        self._decided_tick = -1
-        self._pending = {}
-        self._gate_evidence = None
-        self._gate_adapted_sum = 0.0
-        self._gate_base_sum = 0.0
-        self._gate_evidence_ticks = 0
-        self.overlay_table.reset()
-        self.history.clear()
-        self.observations.clear()
-        self.fit_history.clear()
-        self._proposal = None
-        self._proposal_serial = 0
-        self._validation_candidate_sum = 0.0
-        self._validation_base_sum = 0.0
-        self._validation_ticks = []
-        self.proposals.clear()
-        self.rejections.clear()
-        self.decisions.clear()
-        self.refusals.clear()
-        self.last_budget = None
-        self.working_model = copy.deepcopy(self.base_model)
-        self.working_model.eval()
-
-    def propose_overlay_from_buffer(
+    # ------------------------------------------------ candidate nursery (E)
+    def birth_candidate(
         self,
         tick: int,
         *,
-        fit_window: int = 16,
+        fit_window: int = DEFAULT_FIT_WINDOW,
         stream: int = 0,
-        motif_id: str = "single-stream",
-        validation_window: int | None = None,
-    ) -> ValidationProposal | None:
-        """Fit a candidate on the last ``fit_window`` real transitions of one
-        stream **ending at** ``tick`` and hold it for pre-adoption validation.
+    ) -> CandidateRecord | None:
+        """Fit a **shadow** patch and birth it into the nursery (``#18``).
 
-        Round 9a (user decision 2): the interference check moves upstream.
-        The candidate is *not* born and *not* activated here.  It is
-        validated on the next ``validation_window`` observations of the same
-        stream whose frame tick is strictly greater than ``fit_last_tick``
-        (default ``validation_window = stale_patience = 2`` -- the same
-        patience the staleness decision uses, documented).  The birth
-        decision is taken by :meth:`resolve_proposal` once that window is
-        complete.
+        The fit is the existing capacity-bounded one (``_fit_overlay``:
+        ``K <= gamma*N*D`` with ``gamma = 5.0``, last head layer only, SVD
+        truncation, 40 AdamW steps on a deep copy of the base model) on the
+        **last ``fit_window`` real transitions ending at ``tick``** -- the
+        same evidence window the round-9a proposal used, and the same
+        ``FitRecord``/refusal-reason machinery (``capacity``, ``no-evidence``,
+        ``no-improvement``).
 
-        The fit sees only real transitions of this stream ending at
-        ``tick`` -- no data beyond the proposal tick, no cross-stream bank
-        data, no post-hoc fit-variant selection.  Returns ``None`` when no
-        candidate is admissible; the refusal is recorded in
-        ``fit_history`` with a ``reason`` (``capacity``, ``no-evidence``,
-        ``no-improvement`` or ``cooldown``).
+        Round 11 (E): the fitted patch is **not applied** -- not activated, not
+        attached to the live model, not written to the overlay table.  It is
+        stored in :class:`CandidateTable` as the candidate's substance, and
+        a shadow predictor copy is built for it.  ``None`` means the fit was
+        refused (the refusal is recorded, never silent).
         """
         tick = int(tick)
-        if fit_window < 2:
+        if int(fit_window) < 2:
             raise ValueError("fit_window must be >= 2")
-        if self._proposal is not None:
-            raise AssertionError(
-                "a pre-adoption proposal is already pending; resolve it before "
-                "fitting another candidate (one candidate at a time)"
-            )
-        if tick < self._cooldown_until:
-            self._record_refusal("cooldown", 0, EvidenceBudget(0), tick=tick)
-            return None
         first_tick = max(1, tick - int(fit_window) + 1)
         if first_tick >= tick:
             self._record_refusal("no-evidence", 0, EvidenceBudget(0), tick=tick)
             return None
         motif = StructuralMotif(
-            motif_id=motif_id,
-            debris_id="debris-replay",
+            motif_id=f"candidate-window-s{int(stream)}-{tick:04d}",
+            debris_id="debris-candidate",
             centroid=np.zeros(self.base_model.config.latent_dim, dtype=np.float64),
             count=int(fit_window),
             spread=0.0,
@@ -1761,232 +2156,302 @@ class PhysicsOrgan:
         overlay = self._fit_overlay(motif, tick)
         if overlay is None:
             return None
-        budget = self.last_budget
-        if budget is None:  # pragma: no cover - every fit attempt sets it
-            raise AssertionError("fit admitted an overlay without a recorded budget")
+        # No peeking: every fitted transition ends at or before the birth tick
+        # (the fit path can only see the causal cache, this is the falsifier).
         self._self_guard_fit_boundary(motif, tick)
-        self._proposal_serial += 1
-        proposal = ValidationProposal(
-            proposal_id=f"prop-{self._proposal_serial:02d}",
-            stream=int(stream),
-            proposal_tick=tick,
-            fit_first_tick=int(first_tick),
-            fit_last_tick=tick,
-            fit_window=int(fit_window),
-            validation_window=int(
-                self.thresholds.stale_patience if validation_window is None
-                else validation_window
-            ),
-            motif_id=motif_id,
-            budget=budget,
-            candidate=overlay,
+        self._candidate_serial += 1
+        candidate_id = f"cand-{self._candidate_serial:02d}"
+        overlay = replace(overlay, overlay_id=candidate_id)
+        record = CandidateRecord(
+            candidate_id=candidate_id,
+            overlay=overlay,
+            born_tick=tick,
         )
-        self._proposal = proposal
-        self._validation_candidate_sum = 0.0
-        self._validation_base_sum = 0.0
-        self._validation_ticks = []
-        self.proposals.append(proposal)
-        return proposal
+        self.nursery.birth(record)
+        # A standalone copy of the base *predictor* with the candidate's patch
+        # applied once.  It is never the live model; bit-identity of the live
+        # model is asserted on every ``shadow_scores`` call.
+        self._shadow_predictors[candidate_id] = self._build_shadow_predictor(overlay)
+        return record
+
+    def _build_shadow_predictor(self, overlay: PredictorOverlay) -> Any:
+        shadow = copy.deepcopy(self.base_model.predictor)
+        shadow.eval()
+        for parameter in shadow.parameters():
+            parameter.requires_grad_(False)
+        overlay.apply_to_predictor(shadow)
+        return shadow
+
+    def _shadow_predictor(self, record: CandidateRecord) -> Any:
+        shadow = self._shadow_predictors.get(record.candidate_id)
+        if shadow is None:  # pragma: no cover - built at birth; store-side prune
+            shadow = self._build_shadow_predictor(record.overlay)
+            self._shadow_predictors[record.candidate_id] = shadow
+        return shadow
+
+    def _transitions_at(
+        self, tick: int, *, stream: int | None = None
+    ) -> list[tuple[int, torch.Tensor, int, torch.Tensor | None, torch.Tensor]]:
+        """The real transitions whose frame tick is ``tick`` (one per stream)."""
+        found: list[tuple[int, torch.Tensor, int, torch.Tensor | None, torch.Tensor]] = []
+        for key in sorted(self._streams):
+            if stream is not None and int(key) != int(stream):
+                continue
+            for item in self._streams[key].transitions:
+                if int(item[0]) == int(tick):
+                    found.append(item)
+        return found
+
+    def shadow_scores(
+        self,
+        tick: int,
+        *,
+        stream: int | None = None,
+        exclude_born_at: int | None = None,
+    ) -> dict[str, tuple[float, float]]:
+        """Shadow-score every resident candidate on this tick's transition.
+
+        For each resident candidate the candidate's patch is evaluated on the
+        **shadow copy of the predictor** built at birth, and the base
+        predictor is evaluated on the same transition; both use the stream's
+        own ``hidden_before``, which is valid because a head-only patch leaves
+        the GRU untouched.  Returns ``candidate_id -> (adapted, base)`` and
+        appends exactly one ``(tick, adapted, base)`` sample per resident
+        candidate (re-scoring the same tick is idempotent: the existing
+        sample is returned, not duplicated).
+
+        **The candidate never steers.**  After scoring, the encoder, the base
+        predictor and the live working model are asserted bit-identical to
+        their values before the call; a difference raises ``AssertionError``
+        (a wiring defect, never a silent drift).
+
+        ``adapted``/``base`` are the mean squared latent prediction errors
+        over every stream's transition at ``tick`` (one stream in the
+        executor run).
+
+        ``exclude_born_at`` skips every candidate born at that tick.  A
+        candidate is fitted on the last ``fit_window`` transitions ending at
+        its birth tick, so its birth-tick transition is **in-sample**: the
+        patch was optimised on it by construction.  Counting that sample
+        would bias the residence evidence favourably, and the executor's
+        store-side annotation runs before the ``#18`` birth commits, so the
+        store can never carry it.  The registered run therefore scores
+        candidates from ``born_tick + 1`` (out-of-sample only), keeping the
+        organ's evidence set identical to the store's.
+        """
+        tick = int(tick)
+        transitions = self._transitions_at(tick, stream=stream)
+        if not transitions:
+            return {}
+        encoder_before = [
+            parameter.detach().clone()
+            for parameter in self.base_model.encoder_parameters()
+        ]
+        base_before = [
+            parameter.detach().clone()
+            for parameter in self.base_model.predictor.parameters()
+        ]
+        working_before = [
+            parameter.detach().clone()
+            for parameter in self.working_model.parameters()
+        ]
+        scores: dict[str, tuple[float, float]] = {}
+        for record in self.nursery.resident():
+            if (
+                exclude_born_at is not None
+                and int(record.born_tick) == int(exclude_born_at)
+            ):
+                continue
+            existing = record.evidence[-1] if record.evidence else None
+            if existing is not None and int(existing[0]) == tick:
+                scores[record.candidate_id] = (float(existing[1]), float(existing[2]))
+                continue
+            shadow = self._shadow_predictor(record)
+            adapted_errors: list[float] = []
+            base_errors: list[float] = []
+            with torch.no_grad():
+                for _, prev_latent, action, hidden_before, latent in transitions:
+                    z_t = (
+                        prev_latent.unsqueeze(0)
+                        if prev_latent.ndim == 1
+                        else prev_latent
+                    )
+                    actions = torch.as_tensor([int(action)], dtype=torch.long)
+                    adapted_prediction, _ = shadow.step(z_t, actions, hidden_before)
+                    base_prediction, _ = self.base_model.predictor.step(
+                        z_t, actions, hidden_before
+                    )
+                    adapted_error = adapted_prediction.reshape(-1) - latent.reshape(-1)
+                    base_error = base_prediction.reshape(-1) - latent.reshape(-1)
+                    adapted_errors.append(
+                        float(torch.mean(adapted_error * adapted_error))
+                    )
+                    base_errors.append(float(torch.mean(base_error * base_error)))
+            adapted = float(np.mean(adapted_errors))
+            base = float(np.mean(base_errors))
+            if not (np.isfinite(adapted) and np.isfinite(base)):
+                continue
+            self.nursery.observe(record.candidate_id, tick, adapted, base)
+            scores[record.candidate_id] = (adapted, base)
+        self._assert_never_steered(encoder_before, base_before, working_before)
+        return scores
+
+    def _assert_never_steered(
+        self,
+        encoder_before: Sequence[torch.Tensor],
+        base_before: Sequence[torch.Tensor],
+        working_before: Sequence[torch.Tensor],
+    ) -> None:
+        """Assert the shadow probe left the encoder and live predictors alone."""
+        current_encoder = [
+            parameter.detach()
+            for parameter in self.base_model.encoder_parameters()
+        ]
+        current_base = [
+            parameter.detach()
+            for parameter in self.base_model.predictor.parameters()
+        ]
+        current_working = [
+            parameter.detach() for parameter in self.working_model.parameters()
+        ]
+        same = (
+            len(current_encoder) == len(encoder_before)
+            and len(current_base) == len(base_before)
+            and len(current_working) == len(working_before)
+            and all(
+                torch.equal(now, then)
+                for now, then in zip(current_encoder, encoder_before)
+            )
+            and all(
+                torch.equal(now, then) for now, then in zip(current_base, base_before)
+            )
+            and all(
+                torch.equal(now, then)
+                for now, then in zip(current_working, working_before)
+            )
+        )
+        if not same:
+            raise AssertionError(
+                "a candidate patch touched the live model: shadow scoring must "
+                "never steer (encoder and live predictor must stay bit-identical)"
+            )
+
+    def retire_candidate(self, candidate_id: str, tick: int) -> CandidateRecord:
+        """Retire a resident candidate and drop its shadow predictor."""
+        record = self.nursery.retire(candidate_id, tick)
+        self._shadow_predictors.pop(record.candidate_id, None)
+        return record
+
+    def promote_candidate(self, candidate_id: str, tick: int) -> PromotionRecord:
+        """Promote a candidate (``#22`` lineage consumption) and log evidence."""
+        promotion = self.nursery.promote(candidate_id, tick)
+        self._shadow_predictors.pop(promotion.candidate_id, None)
+        return promotion
+
+    def prune_candidates(
+        self, resident_ids: "set[str] | frozenset[str]"
+    ) -> tuple[CandidateRecord, ...]:
+        """Drop organ-side candidates the store no longer holds (Q1-A)."""
+        removed = self.nursery.prune_to(resident_ids)
+        for record in removed:
+            self._shadow_predictors.pop(record.candidate_id, None)
+        return removed
+
+    # ------------------------------------------------------- nursery reads
+    @property
+    def promotions(self) -> tuple[PromotionRecord, ...]:
+        """The promotion log, newest last (the ADMISSION gate's evidence)."""
+        return tuple(self.nursery.promotions)
+
+    def candidate_ids(self) -> tuple[str, ...]:
+        return self.nursery.ids()
+
+    def candidate_record(self, candidate_id: str) -> CandidateRecord | None:
+        return self.nursery.record(candidate_id)
+
+    def candidate_patch(self, candidate_id: str) -> PredictorOverlay | None:
+        """The candidate's stored patch (the store's ``#18`` attach hook)."""
+        return self.nursery.patch(candidate_id)
+
+    def residence_evidence(
+        self, candidate_id: str
+    ) -> tuple[int, float, float, float]:
+        """``(ticks, adapted_mean, base_mean, ratio)`` for one candidate.
+
+        This is the Round-11 replacement for the deleted live-overlay gate:
+        the ``#23`` survivor body and the ``#22`` decision are both derived
+        from this evidence.
+        """
+        record = self.nursery.require(candidate_id)
+        return (
+            int(record.residence_ticks),
+            float(record.adapted_mean),
+            float(record.base_mean),
+            float(record.ratio),
+        )
+
+    def qualified(self, candidate_id: str) -> bool:
+        """True iff the candidate passes the ``#23`` residence selection."""
+        record = self.nursery.require(candidate_id)
+        return bool(record.qualified(self.thresholds.residence_n))
+
+    def survivor(self) -> CandidateRecord | None:
+        """The ``#23`` selection, organ-side: lowest ratio, oldest tie-break.
+
+        Delegates to :meth:`CandidateTable.survivor`: the selection does
+        **not** pre-filter on ``qualified`` (contract §1.9), so a harmful
+        survivor surfaces with ``qualified(...) is False`` and the ``#22``
+        gate is the thing that refuses it.  The store's
+        ``MatBoard.nursery_survivor`` is the same selection on the same
+        evidence; this mirror exists for the organ-level probe.
+        """
+        return self.nursery.survivor()
+
+    def reset_p6_state(self) -> None:
+        """Clear all P6 decision state, lifecycle table and fit artifacts.
+
+        Called by ``PhysicsRun.__init__`` and ``PhysicsRun.reset`` so a
+        second run on the same organ is a fresh experiment: no pending
+        decisions, cooldown, stale run, overlay records/patches, nursery
+        candidates/evidence/promotions or fit history survive.  E1 (environment/streams)
+        and the frozen base model are untouched; the working model is
+        restored to the base copy.
+        """
+        self._active_overlay_id = None
+        self._active_adapter = None
+        self._overlay_serial = 0
+        self._cooldown_until = -1
+        self._stale_run = 0
+        self._decided_tick = -1
+        self._pending = {}
+        self.overlay_table.reset()
+        self.history.clear()
+        self.observations.clear()
+        self.fit_history.clear()
+        self.refusals.clear()
+        self.last_budget = None
+        # Round 11 (E): the nursery is part of P6 state.  Records, evidence,
+        # promotions, eviction log and every shadow predictor are dropped;
+        # a second run on the same organ is a fresh experiment.
+        self.nursery.reset()
+        self._candidate_serial = 0
+        self._shadow_predictors.clear()
+        self.working_model = copy.deepcopy(self.base_model)
+        self.working_model.eval()
 
     def _self_guard_fit_boundary(self, motif: StructuralMotif, tick: int) -> None:
         """No peeking: every fitted transition must end at or before ``tick``."""
         if int(motif.last_tick) > int(tick):
             raise AssertionError(
-                f"proposal evidence extends past the proposal tick: motif "
+                f"candidate evidence extends past the birth tick: motif "
                 f"last_tick={motif.last_tick} > tick={tick}"
             )
 
-    def _accrue_validation(
-        self,
-        *,
-        frame_tick: int,
-        prev_latent: torch.Tensor,
-        action: int,
-        hidden: torch.Tensor | None,
-        latent: torch.Tensor,
-        base_surprise: float,
-    ) -> None:
-        """Paired candidate-vs-base surprise on one held-out transition.
-
-        The candidate is applied to a **throwaway copy** of the base model;
-        the base answer is the observation's own (unpatched) surprise.  Both
-        values are accumulated as exact floats, paired on the same
-        transition, and only once the observation's frame tick is strictly
-        greater than the fit boundary (no peeking).
-        """
-        proposal = self._proposal
-        if proposal is None:
-            return
-        if len(self._validation_ticks) >= proposal.validation_window:
-            # The window is exactly ``validation_window`` ticks: extra
-            # observations cannot silently widen it.
-            return
-        if int(frame_tick) <= proposal.fit_last_tick:
-            raise AssertionError(
-                f"validation observed frame tick {frame_tick} at or before the "
-                f"fit boundary {proposal.fit_last_tick}; that would be peeking"
-            )
-        probe = copy.deepcopy(self.base_model)
-        proposal.candidate.apply_to(probe)
-        with torch.no_grad():
-            predicted, _ = probe.predict_step(prev_latent, int(action), hidden)
-            error = predicted - latent
-            candidate_surprise = float(torch.mean(error * error))
-        self._validation_candidate_sum += candidate_surprise
-        self._validation_base_sum += float(base_surprise)
-        self._validation_ticks.append(int(frame_tick))
-
-    def resolve_proposal(self, tick: int | None = None) -> OverlayRecord | None:
-        """Take the pre-adoption birth/rejection decision (Round 9a).
-
-        Births the candidate iff the held-out validation window is complete,
-        finite, and ``candidate_mean < base_mean`` **strictly** (no margin).
-        Otherwise the candidate is rejected with a public
-        :class:`RejectionRecord` (reason ``interference``, both measured
-        means, the evidence budget and ``n``), and the organ cooldown starts
-        so the caller does not refit on the next tick.
-
-        Returns the birth record, or ``None`` (no proposal, window still
-        open, or rejected).
-        """
-        proposal = self._proposal
-        if proposal is None:
-            return None
-        if len(self._validation_ticks) < proposal.validation_window:
-            return None
-        decision_tick = int(proposal.proposal_tick if tick is None else tick)
-        if min(self._validation_ticks) <= proposal.fit_last_tick:
-            raise AssertionError("validation evidence at or before the fit boundary")
-        n = len(self._validation_ticks)
-        candidate_mean = self._validation_candidate_sum / float(n)
-        base_mean = self._validation_base_sum / float(n)
-        validation_ticks = tuple(self._validation_ticks)
-        self._proposal = None
-        self._validation_candidate_sum = 0.0
-        self._validation_base_sum = 0.0
-        self._validation_ticks = []
-        passed = bool(
-            np.isfinite(candidate_mean)
-            and np.isfinite(base_mean)
-            and candidate_mean < base_mean
-        )
-        self.decisions.append(
-            ProposalDecision(
-                tick=decision_tick,
-                proposal_id=proposal.proposal_id,
-                proposal_tick=int(proposal.proposal_tick),
-                outcome="birth" if passed else "interference",
-                candidate_mean=float(candidate_mean),
-                base_mean=float(base_mean),
-                n=int(n),
-                validation_ticks=validation_ticks,
-                rank=proposal.candidate.rank,
-                param_count=proposal.candidate.param_count,
-                capacity=proposal.budget.max_params,
-                budget_n=proposal.budget.n_transitions,
-            )
-        )
-        if passed:
-            record = self.overlay_table.birth(
-                proposal.candidate, motif_id=proposal.motif_id, tick=decision_tick
-            )
-            self._set_active_overlay(record.overlay_id)
-            self._stale_run = 0
-            return record
-        self._cooldown_until = decision_tick + self.thresholds.cooldown_ticks
-        self.rejections.append(
-            RejectionRecord(
-                tick=decision_tick,
-                reason="interference",
-                budget=proposal.budget,
-                candidate_mean=float(candidate_mean),
-                base_mean=float(base_mean),
-                n=int(n),
-            )
-        )
-        return None
-
-    def proposal_state(self) -> dict[str, Any]:
-        """The current pre-adoption state (pending proposal or last decision).
-
-        Used by ``PhysicsRun`` to surface the validation trace per tick: on
-        the proposal tick ``validation_n`` is 0, on each validation tick it
-        grows, and from the decision tick onward ``decided`` is true with
-        the outcome and both measured means.
-        """
-        proposal = self._proposal
-        if proposal is not None:
-            n = len(self._validation_ticks)
-            return {
-                "proposal_id": proposal.proposal_id,
-                "proposal_tick": int(proposal.proposal_tick),
-                "rank": int(proposal.candidate.rank),
-                "param_count": int(proposal.candidate.param_count),
-                "capacity": int(proposal.budget.max_params),
-                "budget_n": int(proposal.budget.n_transitions),
-                "validation_n": int(n),
-                "validation_ticks": tuple(self._validation_ticks),
-                "candidate_mean": (
-                    self._validation_candidate_sum / n if n else None
-                ),
-                "base_mean": (
-                    self._validation_base_sum / n if n else None
-                ),
-                "decided": False,
-                "outcome": None,
-                "rejection": None,
-            }
-        if self.decisions:
-            decision = self.decisions[-1]
-            return {
-                "proposal_id": decision.proposal_id,
-                "proposal_tick": int(decision.proposal_tick),
-                "rank": int(decision.rank),
-                "param_count": int(decision.param_count),
-                "capacity": int(decision.capacity),
-                "budget_n": int(decision.budget_n),
-                "validation_n": int(decision.n),
-                "validation_ticks": decision.validation_ticks,
-                "candidate_mean": float(decision.candidate_mean),
-                "base_mean": float(decision.base_mean),
-                "decided": True,
-                "outcome": decision.outcome,
-                "rejection": (
-                    None if decision.outcome == "birth" else decision.outcome
-                ),
-            }
-        return {
-            "proposal_id": None,
-            "proposal_tick": None,
-            "rank": 0,
-            "param_count": 0,
-            "capacity": 0,
-            "budget_n": 0,
-            "validation_n": 0,
-            "validation_ticks": (),
-            "candidate_mean": None,
-            "base_mean": None,
-            "decided": False,
-            "outcome": None,
-            "rejection": None,
-        }
-
     # --------------------------------------------------------- overlay apply
     def _set_active_overlay(self, overlay_id: str | None) -> None:
-        if overlay_id is not None:
-            # A candidate cannot be validated against a patched predictor;
-            # activating any overlay drops a still-pending proposal.
-            self._proposal = None
         adapter = None if overlay_id is None else self.overlay_table.resolve(overlay_id)
         if overlay_id is not None and adapter is None:
             overlay_id = None
-        if overlay_id != self._active_overlay_id:
-            # A different overlay (or none) means the previous evidence
-            # verdict belongs to another patch and must not be reused.
-            self._gate_evidence = None
-            self._gate_adapted_sum = 0.0
-            self._gate_base_sum = 0.0
-            self._gate_evidence_ticks = 0
         previous = self._active_adapter
         if overlay_id == self._active_overlay_id and adapter is previous:
             return
@@ -2261,29 +2726,46 @@ class PhysicsOrgan:
             return sorted(stream for stream in self.fit_streams if stream in self._streams)
         return sorted(self._streams)
 
-    # -------------------------------------------------------------- accept
-    def acceptance_scenario(
+    # ------------------------------------------------- nursery probe (E/F)
+    def nursery_scenario(
         self,
         *,
-        seed: int = 31,
-        n_fit_streams: int = 24,
-        n_heldout_streams: int = 8,
+        seed: int = 0,
+        n_streams: int = 4,
         horizon: int = 36,
         flip_at: int = 8,
         flip_back_at: int = 28,
+        fit_window: int = DEFAULT_FIT_WINDOW,
         episode_offset: int = 0,
-    ) -> "AcceptanceTrace":
-        """Run the phase-5 acceptance probe and return its numbered trace.
+    ) -> "NurseryTrace":
+        """Run the organ-level nursery probe on a real flip scenario.
 
-        A **bank** of paired streams (the phase-3 evaluation seeds/actions)
-        runs normal -> gravity flip -> ... -> gravity flip back.  The first
-        ``n_fit_streams`` streams feed the digest and the overlay fit; the
-        last ``n_heldout_streams`` are evaluation-only (their residuals are
-        never ingested).  This is a shaped probe: the executor sees one
-        stream, and the measured single-stream overlay does *not* generalise
-        forward (see the module docstring).
+        A bank of ``n_streams`` paired streams runs
+        ``normal -> gravity flip -> ... -> flip back`` (the shape the round-11
+        registered run uses, pre-registered in
+        ``docs/phase4-5-design.md`` §15.11).  Per tick, after every stream's
+        observation and digest:
+
+        1. the **first** tick whose mean surprise exceeds the measured
+           ``spike_threshold`` births one candidate (``#18``): a shadow patch
+           fitted on the last ``fit_window`` transitions, never applied;
+        2. every resident candidate is shadow-scored against the base
+           predictor (:meth:`shadow_scores`); the candidate never steers;
+        3. a candidate whose residence evidence qualifies is **promoted**
+           (the organ-side mirror of ``#22`` consuming the ``#23`` survivor);
+        4. the tick's ``motif`` cohort (from ``DigestResult.cohorts``) is
+           offered to :meth:`adopt_motif` -- the organ-side mirror of the
+           ``#21`` store read driving ``#24``;
+        5. the P6 staleness/eviction pass runs through ``ratchet``.
+
+        This is a **probe, not the executor run**: the executor's registered
+        gates are computed from ``PhysicsRun`` rows in wave 3.  Every number
+        it returns is measured on this run; no round 7-9a number is
+        re-asserted.  ``self.d4`` is never written (the organ has no D4 path).
         """
-        total = int(n_fit_streams) + int(n_heldout_streams)
+        total = int(n_streams)
+        if total < 1:
+            raise ValueError("n_streams must be >= 1")
         env = PhysicsEnv(WorldConfig(frame_size=self.base_model.config.frame_size))
         frames, actions = _three_phase_rollouts(
             env,
@@ -2294,93 +2776,160 @@ class PhysicsOrgan:
             flip_back_at=int(flip_back_at),
             episode_offset=int(episode_offset),
         )
-        normal_frames, normal_actions = _normal_rollouts(
-            env,
-            total,
-            int(horizon),
-            seed=int(seed),
-            episode_offset=int(episode_offset),
-        )
-        fit_ids = set(range(int(n_fit_streams)))
-        heldout_ids = list(range(int(n_fit_streams), total))
-        self.fit_streams = fit_ids
+        self.reset_p6_state()
+        self.fit_streams = set(range(total))
         self._streams.clear()
-        self._pending.clear()
-        self._decided_tick = -1
-        self._active_overlay_id = None
-        self._active_adapter = None
-        self._cooldown_until = -1
-        self._stale_run = 0
-        self.history.clear()
-        self.observations.clear()
-        self.working_model = copy.deepcopy(self.base_model)
 
         events: list[RatchetResult] = []
-        ticks: list[AcceptanceTick] = []
+        rows: list[NurseryTick] = []
+        born: list[dict[str, Any]] = []
+        cohort_counts: dict[str, int] = {kind: 0 for kind in COHORT_KINDS}
+        promoted_ids: list[str] = []
+        active_candidate: CandidateRecord | None = None
+        #: Per-tick ``(tick, adapted, base)`` means over the observations the
+        #: **live** overlay actually steered -- the counterfactual base side
+        #: comes from ``Observation.base_surprise`` (the same transition
+        #: re-predicted by the unpatched base model).
+        live_rows: list[tuple[int, float, float]] = []
         for stream in range(total):
             self.begin_stream(frames[stream, 0], stream=stream, seed=int(seed) + stream)
         for index in range(int(horizon)):
             tick = index + 1
+            tick_cohorts: list[CohortRecord] = []
             for stream in range(total):
                 observation = self.observe(
                     frames[stream, tick],
                     int(actions[stream, index]),
                     stream=stream,
-                    ingest=stream in fit_ids,
+                    ingest=True,
                 )
                 digest = self.digest(observation)
+                tick_cohorts.extend(digest.cohorts)
+                for cohort in digest.cohorts:
+                    cohort_counts[cohort.kind] += 1
                 result = self.ratchet(digest)
                 if not result.empty:
                     events.append(result)
             window = self.observations[-total:]
-            ticks.append(
-                AcceptanceTick(
+            applied = [
+                item
+                for item in window
+                if item.overlay_id is not None
+                and np.isfinite(item.surprise)
+                and np.isfinite(item.base_surprise)
+            ]
+            if applied:
+                live_rows.append(
+                    (
+                        tick,
+                        float(np.mean([item.surprise for item in applied])),
+                        float(np.mean([item.base_surprise for item in applied])),
+                    )
+                )
+            mean_surprise = float(np.mean([item.surprise for item in window]))
+            fit_surprise = mean_surprise
+            all_surprises = [
+                item.surprise for item in window if np.isfinite(item.surprise)
+            ]
+            if all_surprises:
+                mean_surprise = float(np.mean(all_surprises))
+            # 1. #18: immediate birth on the first spike (never delayed).
+            candidate: CandidateRecord | None = None
+            if (
+                active_candidate is None
+                and tick > 2
+                and np.isfinite(mean_surprise)
+                and mean_surprise > self.thresholds.spike_threshold
+            ):
+                candidate = self.birth_candidate(tick, fit_window=fit_window, stream=0)
+                if candidate is not None:
+                    active_candidate = candidate
+                    born.append(
+                        {
+                            "candidate_id": candidate.candidate_id,
+                            "born_tick": tick,
+                            "rank": candidate.overlay.rank,
+                            "param_count": candidate.overlay.param_count,
+                            "fit_transitions": candidate.overlay.fit_transitions,
+                            "loss_before": candidate.overlay.loss_before,
+                            "loss_after": candidate.overlay.loss_after,
+                        }
+                    )
+            # 2. shadow scoring: one paired sample per resident candidate,
+            #    out-of-sample only (the birth tick is in the fit window).
+            scores = self.shadow_scores(
+                tick,
+                exclude_born_at=(
+                    None if candidate is None else candidate.born_tick
+                ),
+            )
+            shadow_ratio = None
+            if scores:
+                adapted = float(np.mean([pair[0] for pair in scores.values()]))
+                base = float(np.mean([pair[1] for pair in scores.values()]))
+                shadow_ratio = adapted / base if base > 0.0 else float("inf")
+            # 3. #22 mirror: promote the **qualified** survivor only.
+            survivor = self.survivor()
+            survivor_qualified = (
+                survivor is not None
+                and survivor.qualified(self.thresholds.residence_n)
+            )
+            promoted_id = None
+            if (
+                survivor is not None
+                and survivor_qualified
+                and survivor.candidate_id not in promoted_ids
+            ):
+                promotion = self.promote_candidate(survivor.candidate_id, tick)
+                promoted_ids.append(promotion.candidate_id)
+                promoted_id = promotion.candidate_id
+                if active_candidate is not None and (
+                    active_candidate.candidate_id == promotion.candidate_id
+                ):
+                    active_candidate = None
+            # 4. #21 -> #24 mirror: adopt the tick's motif cohort.
+            motif = _best_motif_cohort(tick_cohorts)
+            motif_id = None
+            adopted: OverlayRecord | None = None
+            if motif is not None:
+                motif_id = motif.cohort_id
+                adopted = self.adopt_motif(motif, tick)
+            rows.append(
+                NurseryTick(
                     tick=tick,
                     phase=_phase(tick, int(flip_at), int(flip_back_at)),
-                    mean_surprise=float(np.mean([o.surprise for o in window])),
-                    fit_surprise=float(
-                        np.mean([o.surprise for o in window[: int(n_fit_streams)]])
-                    ),
-                    heldout_surprise=float(
-                        np.mean([o.surprise for o in window[int(n_fit_streams) :]])
+                    mean_surprise=mean_surprise,
+                    candidates=self.candidate_ids(),
+                    shadow_ratio=shadow_ratio,
+                    survivor_id=None if survivor is None else survivor.candidate_id,
+                    promoted_id=promoted_id,
+                    motif_id=motif_id,
+                    adopted_overlay_id=(
+                        None if adopted is None else adopted.overlay_id
                     ),
                     active_overlay_id=self._active_overlay_id,
+                    cohort_kinds=tuple(sorted({c.kind for c in tick_cohorts})),
+                    survivor_qualified=bool(survivor_qualified),
                 )
             )
         events.extend(self.flush())
-
-        # Counterfactual base-predictor surprise on the same held-out frames.
-        with torch.no_grad():
-            z_held = self.base_model.encode(frames_tensor_from(frames[heldout_ids]))
-            a_held = torch.from_numpy(actions[heldout_ids]).long()
-            base_held = (
-                (self.base_model.predict(z_held, a_held) - z_held[:, 1:])
-                .pow(2)
-                .mean(dim=-1)
-                .cpu()
-                .numpy()
-            )
-            z_normal = self.base_model.encode(frames_tensor_from(normal_frames[heldout_ids]))
-            a_normal = torch.from_numpy(normal_actions[heldout_ids]).long()
-            normal_held = (
-                (self.base_model.predict(z_normal, a_normal) - z_normal[:, 1:])
-                .pow(2)
-                .mean(dim=-1)
-                .cpu()
-                .numpy()
-            )
-        return AcceptanceTrace(
-            tick_rows=tuple(ticks),
+        return NurseryTrace(
+            tick_rows=tuple(rows),
             events=tuple(events),
-            base_heldout=base_held,
-            normal_heldout=normal_held,
-            flip_at=int(flip_at),
-            flip_back_at=int(flip_back_at),
-            n_fit_streams=int(n_fit_streams),
-            n_heldout_streams=int(n_heldout_streams),
+            cohort_counts=cohort_counts,
+            born=tuple(born),
+            promotions=tuple(self.nursery.promotions),
+            live_rows=tuple(live_rows),
+            overlay_births=tuple(self.overlay_table.births),
+            overlay_revalidations=tuple(self.overlay_table.revalidations),
+            overlay_stales=tuple(self.overlay_table.stales),
+            overlay_evictions=tuple(self.overlay_table.evictions),
             d4_writes=int(self.d4.writes),
             encoder_bit_identical=self.encoder_bit_identical(),
             thresholds=self.thresholds,
+            flip_at=int(flip_at),
+            flip_back_at=int(flip_back_at),
+            n_streams=total,
         )
 
 
@@ -2399,18 +2948,6 @@ def _phase(tick: int, flip_at: int, flip_back_at: int | None) -> str:
 def frames_tensor_from(frames: np.ndarray) -> torch.Tensor:
     """``(N, T, H, W, 3)`` uint8 numpy -> ``(N, T, 3, H, W)`` torch tensor."""
     return torch.from_numpy(np.ascontiguousarray(frames)).permute(0, 1, 4, 2, 3)
-
-
-def _normal_rollouts(
-    env: PhysicsEnv,
-    n_episodes: int,
-    horizon: int,
-    *,
-    seed: int,
-    episode_offset: int = 0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """The paired no-flip twin: identical seeds and action streams."""
-    return _rollouts(env, n_episodes, horizon, seed, episode_offset=episode_offset)
 
 
 def _three_phase_rollouts(
@@ -2444,58 +2981,63 @@ def _three_phase_rollouts(
     return frames, actions
 
 
-def _rollouts(
-    env: PhysicsEnv,
-    n_episodes: int,
-    horizon: int,
-    seed: int,
-    *,
-    episode_offset: int = 0,
-) -> tuple[np.ndarray, np.ndarray]:
-    size = env.config.frame_size
-    frames = np.empty((n_episodes, horizon + 1, size, size, 3), dtype=np.uint8)
-    actions = np.empty((n_episodes, horizon), dtype=np.int64)
-    for episode in range(n_episodes):
-        episode_seed = _episode_seed(seed, episode + episode_offset)
-        rng = _action_rng(seed, episode + episode_offset)
-        frames[episode, 0] = env.reset(seed=episode_seed, gravity_sign=1)
-        for t in range(horizon):
-            action = int(rng.integers(0, env.n_actions))
-            actions[episode, t] = action
-            frames[episode, t + 1] = env.step(action)
-    return frames, actions
-
-
 # --------------------------------------------------------------------------
-# Acceptance trace
+# The nursery probe trace (Round 11)
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
-class AcceptanceTick:
-    """One scene tick of the acceptance probe (per-stream means)."""
+class NurseryTick:
+    """One scene tick of the nursery probe (per-stream means)."""
 
     tick: int
     phase: str
     mean_surprise: float
-    fit_surprise: float
-    heldout_surprise: float
+    candidates: tuple[str, ...]
+    shadow_ratio: float | None
+    survivor_id: str | None
+    promoted_id: str | None
+    motif_id: str | None
+    adopted_overlay_id: str | None
     active_overlay_id: str | None
+    cohort_kinds: tuple[str, ...]
+    #: ``#23``'s ``qualified`` flag for ``survivor_id`` (Round 11: the
+    #: survivor is surfaced regardless, and this records whether ``#22``
+    #: would pass or refuse it).
+    survivor_qualified: bool = False
+
+
+def _best_motif_cohort(cohorts: Sequence[CohortRecord]) -> CohortRecord | None:
+    """The tick's motif cohort the ratchet would mine: most support first."""
+    motifs = [cohort for cohort in cohorts if cohort.kind == "motif"]
+    if not motifs:
+        return None
+    return max(motifs, key=lambda cohort: (cohort.count, cohort.last_tick))
 
 
 @dataclass(frozen=True)
-class AcceptanceTrace:
-    """The numbered acceptance record; every number is measured."""
+class NurseryTrace:
+    """The numbered nursery record; every number is measured on this run."""
 
-    tick_rows: tuple[AcceptanceTick, ...]
+    tick_rows: tuple[NurseryTick, ...]
     events: tuple[RatchetResult, ...]
-    base_heldout: np.ndarray
-    normal_heldout: np.ndarray
-    flip_at: int
-    flip_back_at: int
-    n_fit_streams: int
-    n_heldout_streams: int
+    cohort_counts: dict[str, int]
+    born: tuple[dict[str, Any], ...]
+    promotions: tuple[PromotionRecord, ...]
+    #: Per-tick ``(tick, adapted, base)`` means over the observations the live
+    #: overlay steered, with the paired base counterfactual (measured state).
+    live_rows: tuple[tuple[int, float, float], ...]
+    #: The live-overlay lifecycle logs (``adopt_motif`` births/revalidations
+    #: no longer flow through ``_decide_tick``; the counters are the organ's
+    #: own tables, read directly so no event is lost).
+    overlay_births: tuple[OverlayRecord, ...]
+    overlay_revalidations: tuple[OverlayRecord, ...]
+    overlay_stales: tuple[OverlayRecord, ...]
+    overlay_evictions: tuple[OverlayRecord, ...]
     d4_writes: int
     encoder_bit_identical: bool
     thresholds: DigestThresholds
+    flip_at: int
+    flip_back_at: int
+    n_streams: int
 
     # --------------------------------------------------------------- helpers
     def event(self, kind: str) -> list[RatchetResult]:
@@ -2509,77 +3051,134 @@ class AcceptanceTrace:
 
     @property
     def adoption_tick(self) -> int | None:
-        births = [item for item in self.events if item.births]
-        return births[0].tick if births else None
+        return self.overlay_births[0].birth_tick if self.overlay_births else None
 
     @property
     def stale_tick(self) -> int | None:
-        stales = [item for item in self.events if item.stales]
-        return stales[0].tick if stales else None
+        return self.overlay_stales[0].stale_tick if self.overlay_stales else None
 
     @property
     def eviction_tick(self) -> int | None:
-        evictions = [item for item in self.events if item.evictions]
-        return evictions[0].tick if evictions else None
+        """The tick the eviction was decided at.
 
-    def transition_slice(self, start: int, stop: int) -> slice:
-        """Transition-index slice; ``transition i`` predicts frame ``i + 1``."""
-        return slice(start, stop)
+        ``OverlayRecord`` carries the *staleness* tick, not the eviction tick
+        (the record is the D2 payload triple); the eviction decision is
+        logged on the :class:`RatchetResult` of the tick that ran
+        ``evict_due``, so that event tick is authoritative here.
+        """
+        for event in self.events:
+            if event.evictions:
+                return event.tick
+        return None
 
-    def heldout_surprise_array(self) -> np.ndarray:
-        """Observed held-out per-transition surprise, shape ``(H, T)``."""
-        values = np.full((self.n_heldout_streams, len(self.tick_rows)), np.nan)
-        for row in self.tick_rows:
-            values[:, row.tick - 1] = row.heldout_surprise
-        return values
+    @property
+    def candidate_birth_tick(self) -> int | None:
+        return int(self.born[0]["born_tick"]) if self.born else None
+
+    def row(self, tick: int) -> NurseryTick:
+        for item in self.tick_rows:
+            if item.tick == int(tick):
+                return item
+        raise KeyError(f"no row for tick {tick}")
+
+    def shadow_rows(self) -> list[tuple[int, str, float]]:
+        """``(tick, phase, shadow_ratio)`` for every shadow-scored row."""
+        return [
+            (row.tick, row.phase, float(row.shadow_ratio))
+            for row in self.tick_rows
+            if row.shadow_ratio is not None
+        ]
+
+    def adaptation_ratio(self) -> float:
+        """Mean shadow ratio over ``flipped`` rows (the organ-side ADAPTATION).
+
+        This is the *shadow* half of the round-11 gate, computed over this
+        probe's rows only.  The registered gate is computed from the
+        executor's ``RunTick`` rows (wave 3); this value is reported as the
+        organ-level measurement, never as the gate.
+        """
+        ratios = [
+            float(row.shadow_ratio)
+            for row in self.tick_rows
+            if row.phase == "flipped" and row.shadow_ratio is not None
+        ]
+        if not ratios:
+            return float("nan")
+        return float(np.mean(ratios))
+
+    def live_ratio(self, *, phase: str | None = None) -> float:
+        """Mean live adapted / mean live base over the steered ticks.
+
+        ``phase`` restricts the rows to one scene phase (``"flipped"`` /
+        ``"recovered"`` / ``"normal"``).  Reported as measured state
+        (contract §5(iii)), never as a gate.
+        """
+        rows = [
+            row
+            for row in self.live_rows
+            if phase is None
+            or _phase(row[0], self.flip_at, self.flip_back_at) == phase
+        ]
+        if not rows:
+            return float("nan")
+        base = float(np.mean([row[2] for row in rows]))
+        if not np.isfinite(base) or base <= 0.0:
+            return float("inf")
+        return float(np.mean([row[1] for row in rows]) / base)
+
+    def lifecycle(self) -> dict[str, Any]:
+        """The lifecycle event ticks (measured, may be ``None``)."""
+        return {
+            "candidate_birth": self.candidate_birth_tick,
+            "promotion": (
+                self.promotions[0].promoted_tick if self.promotions else None
+            ),
+            "overlay_birth": self.adoption_tick,
+            "overlay_stale": self.stale_tick,
+            "overlay_evict": self.eviction_tick,
+            "d4_writes": int(self.d4_writes),
+            "encoder_bit_identical": bool(self.encoder_bit_identical),
+            "cohort_counts": dict(self.cohort_counts),
+            # ``#23`` surfacing is counted separately from promotion so a
+            # harmful survivor that the ``#22`` mirror refused stays visible.
+            "survivor_ticks": sum(
+                1 for row in self.tick_rows if row.survivor_id is not None
+            ),
+            "refused_harmful_survivors": sum(
+                1
+                for row in self.tick_rows
+                if row.survivor_id is not None and not row.survivor_qualified
+            ),
+        }
 
     def summary(self) -> dict[str, Any]:
         """Measured summary used by the report and the design memo."""
-        held = self.heldout_surprise_array()
-        post = slice(self.flip_at, self.flip_back_at)
-        normal_post = float(self.normal_heldout[:, post].mean())
-        base_post = float(self.base_heldout[:, post].mean())
-        peak = float(self.base_heldout[:, post].mean(axis=0).max())
-        adoption = self.adoption_tick
-        if adoption is not None:
-            after = slice(max(self.flip_at, adoption), self.flip_back_at)
-            adapted_after = float(np.nanmean(held[:, after]))
-            base_after = float(self.base_heldout[:, after].mean())
-            normal_after = float(self.normal_heldout[:, after].mean())
-        else:  # pragma: no cover - no adoption means no recovery claim
-            adapted_after = float("nan")
-            base_after = float("nan")
-            normal_after = float("nan")
         return {
-            "normal_baseline_mean": float(self.thresholds.normal_baseline),
-            "normal_phase_heldout_mean": float(
-                self.base_heldout[:, : self.flip_at + 1].mean()
+            "scenario": {
+                "n_streams": int(self.n_streams),
+                "flip_at": int(self.flip_at),
+                "flip_back_at": int(self.flip_back_at),
+                "ticks": len(self.tick_rows),
+            },
+            "cohort_counts": dict(self.cohort_counts),
+            "candidates": tuple(self.born),
+            "promotions": tuple(
+                promotion.__dict__ for promotion in self.promotions
             ),
-            "post_flip_base_mean": base_post,
-            "post_flip_peak_tick_mean": peak,
-            "post_flip_over_normal": base_post / normal_post if normal_post else float("nan"),
-            "adoption_tick": adoption,
-            "stale_tick": self.stale_tick,
-            "eviction_tick": self.eviction_tick,
-            "adapted_post_mean": adapted_after,
-            "base_post_adoption_mean": base_after,
-            "adapted_over_base": (
-                adapted_after / base_after if base_after else float("nan")
-            ),
-            "adapted_over_normal": (
-                adapted_after / normal_after if normal_after else float("nan")
-            ),
-            "normal_post_mean": normal_post,
-            "d4_writes": int(self.d4_writes),
-            "encoder_bit_identical": bool(self.encoder_bit_identical),
+            "shadow_adaptation_ratio": self.adaptation_ratio(),
+            "live_overlay_ratio": self.live_ratio(),
+            "live_overlay_ratio_flipped": self.live_ratio(phase="flipped"),
+            "live_ticks": len(self.live_rows),
+            "lifecycle": self.lifecycle(),
         }
 
     def __str__(self) -> str:  # pragma: no cover - human display
-        lines = ["acceptance trace"]
+        lines = ["nursery trace"]
         for row in self.tick_rows:
             lines.append(
-                f"  t={row.tick:2d} {row.phase:9s} mean={row.mean_surprise:.4f} "
-                f"held={row.heldout_surprise:.4f} overlay={row.active_overlay_id}"
+                f"  t={row.tick:2d} {row.phase:9s} surprise={row.mean_surprise:.4f} "
+                f"cands={row.candidates} shadow={row.shadow_ratio} "
+                f"live={row.active_overlay_id}"
             )
         for event in self.events:
             if event.births:

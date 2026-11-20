@@ -93,128 +93,52 @@ read continuity (#7 identity, #8/#23/#25 inherited provenance, seed `(23, 0)`),
 and the structural anti-mint evidence (explicitly labelled evidence, not a
 proof of derivation).
 
-### Provenance coverage by flow (round 10, measured on the corrected 27-flow graph)
+### Provenance coverage by flow (round 11, corrected 27-flow graph)
 
-`synthetic` = no body (`None` placeholder) or a body with no state
-dependency; `derived` = the body is the stored record or a function of live
-node/store state at emission. The `source_fid` column is the producing-flow
-attribution carried in the envelope. **Round 10 changed the graph** (see
-the spec-correction record at the end of this file): #18 is the D2 birth,
-#23 is a D2 read, #21/#27 are D3 reads.
+`synthetic` = no body or a body with no state dependency; `derived` = the
+body is the stored record or a function of live node/store state at
+emission.  The Round-11 schema pins **one exact body type per flow** (writes
+have no `None`; reads allow `None` when the store has nothing to hand over,
+so the A2 ordering rule is untouched — design §15.11 / contract §1.1).
+`source_fid` is the producing-flow attribution carried in the envelope.
 
-| # | Flow | Body this epoch | Coverage | `source_fid` |
+| # | Flow | Pinned body | Physics mode | Dry-run synthetic |
 | --- | --- | --- | --- | --- |
-| 1 | Gradients (E2→P1) | `None` | synthetic | 1 |
-| 2 | Crystallized Output (P1→E2) | `None` | synthetic | 2 |
-| 3 | Perturbations (E1→P1) | `None` | synthetic | 3 |
-| 4 | Active Probes (P1→E1) | `None` | synthetic | 4 |
-| 5 | Entropy Exhaust (P1→E1) | `None` | synthetic | 5 |
-| 6 | Prediction Error (P1→P2) | `None` | synthetic | 6 |
-| 7 | Base Ops (D4→P2) | stored `BiasPrimitive` | **derived** | 22 |
-| 8 | Mat Overlays (D2→P2) | stored `MatOverlay` | **derived** | 18/24 |
-| 9 | Routed Dynamics (P2→P3) | `None` | synthetic | 9 |
-| 10 | Resolved Trajectory (P3→P1) | `None` | synthetic | 10 |
-| 11 | Active Context (D1→P3) | `None` | placeholder | 11 |
-| 12 | State Deltas & Surprise (P3→P4) | `None` | synthetic | 12 |
-| 13 | Board Ops (P4→D1) | `None` | placeholder | 13 |
-| 14 | Slot State (D1→P4) | `None` | placeholder | 14 |
-| 15 | Evicted Clusters (D1→P5) | `None` | placeholder | 15 |
-| 16 | Cost vs. Error (P3→P5) | `None` | placeholder | 16 |
-| 17 | Collapse Mandate (P5→P4) | `None` | synthetic | 17 |
-| 18 | Emergent Crystals (P3→**D2**) | `cry-{tick}` candidate `MatOverlay` | **synthetic** (minted content; PROVISIONAL) | 18 |
-| 19 | Digested Debris (P5→D3) | `None` | synthetic | 19 |
-| 20 | Consumed Scaffolds (D3→**P4**, read) | `None` | placeholder (PROVISIONAL) | 20 |
-| 21 | Structural Motifs (D3→P6, read) | `None` | placeholder (PROVISIONAL) | 21 |
-| 22 | Sedimented Invariants (P6→D4) | rotating `BiasPrimitive` | **synthetic** (minted content) | 22 |
-| 23 | Surviving Crystals (**D2→P6, read**) | stored `MatOverlay` | **derived** | 18/24 |
-| 24 | Ratcheted Overlays (P6→D2) | head identity + tick epoch | **derived** | 24 |
-| 25 | Stale Overlays (D2→P5, read) | stored `MatOverlay` | **derived** | 18/24 |
-| 26 | Avoidance Trails (D3→P2, read) | `None` | placeholder (PROVISIONAL) | 26 |
-| 27 | Dissipated Entropy (D3→P1, read) | `None` | placeholder (PROVISIONAL) | 27 |
+| 1 | Gradients (E2→P1) | — | placeholder | synthetic |
+| 2 | Crystallized Output (P1→E2) | — | placeholder (sink) | synthetic |
+| 3 | Perturbations (E1→P1) | `FrameBody` | **derived** (frame carrier) | `None` |
+| 4 | Active Probes (P1→E1) | — | placeholder (sink) | synthetic |
+| 5 | Entropy Exhaust (P1→E1) | — | placeholder (sink) | synthetic |
+| 6 | Prediction Error (P1→P2) | `PredictionErrorBody` | **derived** | synthetic |
+| 7 | Base Ops (D4→P2) | `BiasPrimitive` \| `None` | **derived** (stored, identity) | derived |
+| 8 | Mat Overlays (D2→P2) | `MatOverlay` \| `None` | **derived** (overlay head) | derived |
+| 9 | Routed Dynamics (P2→P3) | — | placeholder | synthetic |
+| 10 | Resolved Trajectory (P3→P1) | `LatentRolloutBody` | **derived** | synthetic |
+| 11 | Active Context (D1→P3) | `None` | placeholder (D1 frozen) | placeholder |
+| 12 | State Deltas & Surprise (P3→P4) | `StateDeltaBody` | **derived** | synthetic |
+| 13 | Board Ops (P4→D1) | `BoardOpBody` \| `None` | placeholder (#13 blocked) | placeholder |
+| 14 | Slot State (D1→P4) | `SlotStateBody` \| `None` | placeholder (D1 frozen) | placeholder |
+| 15 | Evicted Clusters (D1→P5) | `None` | placeholder (D1 frozen) | placeholder |
+| 16 | Cost vs. Error (P3→P5) | `CostErrorBody` \| `None` | **derived** (new: `error = #12.surprise`, `cost = ‖#12.delta‖₂`) | synthetic |
+| 17 | Collapse Mandate (P5→P4) | `CollapseMandateBody` | **derived** | synthetic |
+| 18 | Emergent Crystals (P3→D2) | `EmergentCrystalBody` (**only**) | **derived** (nursery birth) | synthetic no-op |
+| 19 | Digested Debris (P5→D3) | `DigestedDebrisBody` (**only**) | **derived** (tagged cohorts) | synthetic no-op |
+| 20 | Consumed Scaffolds (D3→P4) | `ScaffoldsBody` \| `None` | **derived** (scaffold cohorts) | None |
+| 21 | Structural Motifs (D3→P6) | `StructuralMotifBody` \| `None` | **derived** (motif cohort) | None |
+| 22 | Sedimented Invariants (P6→D4) | `BiasPrimitive` (**only**) | **derived** (from the #23 survivor) | synthetic |
+| 23 | Surviving Crystals (D2→P6) | `SurvivingCrystalBody` \| `None` | **derived** (nursery survivor + evidence) | None |
+| 24 | Ratcheted Overlays (P6→D2) | `MatOverlay` (**only**) | **derived** (from the #21 motif) | synthetic |
+| 25 | Stale Overlays (D2→P5) | `MatOverlay` \| `None` | **derived** (overlay head, stale label) | derived |
+| 26 | Avoidance Trails (D3→P2) | `AvoidanceTrailsBody` \| `None` | **derived** (trail cohorts) | None |
+| 27 | Dissipated Entropy (D3→P1) | `DissipatedEntropyBody` \| `None` | **derived**, **destructive** | None |
 
-Summary for the default **synthetic dry run** (`SyntheticSource`):
-**5/27 derived** (#7, #8, #23, #24, #25); 22/27 synthetic (20 `None`
-placeholders + #18 + #22). All store reads with a non-`None` body are
-derived; D1/D3 reads stay placeholders because those stores are
-unimplemented in the dry run.
-
-Physics mode (`PhysicsRun` / `PhysicsSource`) derives thirteen flows, so
-**13/27 derived** (four store reads #7/#8/#23/#25 plus the nine non-read
-derivations #3/#6/#10/#12/#17/#18/#19/#22/#24):
-
-| # | Physics-mode body | Class |
-| --- | --- | --- |
-| 3 | perturbation frame | `FrameBody` |
-| 6 | surprise + 64-d residual | `PredictionErrorBody` |
-| 10 | 4-step latent rollout | `LatentRolloutBody` |
-| 12 | 64-d latent delta + surprise | `StateDeltaBody` |
-| 17 | digest collapse mandate | `CollapseMandateBody` |
-| 18 | the loop's candidate crystal (organ adoption record; PROVISIONAL status `candidate`) | `MatOverlay` |
-| 19 | digested debris centroid | `DigestedDebrisBody` |
-| 22 | the real ratchet gate's output (blocked = confidence 0; round 9a passes on real evidence) | `BiasPrimitive` |
-| 24 | organ revalidation record | `MatOverlay` |
-
-Still placeholders in physics mode, by Lead decision: #1 (E2 gradient),
-#2 (crystallized output), #4/#5 (E1 exhaust), #9 (routed dynamics), #13
-(D1 write), #16 (cost/error — 3.0 does not compute it yet). D1 reads
-(#11/#14/#15) and D3 reads (#20/#21/#26/#27) remain placeholders: D1 is
-unimplemented and D3 is written but not read this round. **Round-10
-provisional choices, pending user adjudication:** #18 = `MatOverlay`
-status `candidate` (no predictor patch is *specified* for a candidate;
-the Q1-A absorb path still attaches the validated organ patch — open
-tension recorded in `amateur/physics/run.py`), #23 = the stored D2 head
-record, #20/#21/#27 = `None` (D3 has no read bodies yet), #16 stays
-`None`. The trigger-gated flows carry exact-type **no-op sentinels** on
-non-event ticks (`ovr-noop`, `debris-none`, `motif-none`, `none`), and
-#22 carries the Q4 gate body; the sentinels are constants, not derived
-content, and are never retained in D2/D3/D4. The coverage ledger is plain
-test-only data — no executor behaviour branches on it. See
-[phase4-5-design.md](phase4-5-design.md) §14.
-
-## Layer 2 — Pointwise recurrence, proved (`amateur/dryrun.py`, `formal/DryRun.lean`, `tools/gen_lean.py`, `test_lean_lockstep.py`)
-
-Because each flow's mailbox sees only its own op word, the whole executor
-reduces to a per-flow recurrence. `step_flow(fid, box)` is that pure step;
-the Lean file is generated from the same table and proves its long-run
-shape for *all* ticks, not just sampled ones. The channel semantics are
-the round-7 adjudicated ones (capacity one, first-arrival-wins,
-reject-with-charge; deficits and excesses are distinct scalar charges,
-never summed):
-
-| Theorem | Statement | Cadence |
-| --- | --- | --- |
-| `boxes_bounded` | every mailbox depth <= 1 at every tick boundary (cold start) | tick-induction over the dry-run op table (plumbing cadence) |
-| `boxes_master`  | for `t >= 1`, depth profile is exactly `{10: 1, 17: 1}`, zero elsewhere |
-| `misses_master` | cumulative misses are exactly one on each cycle, frozen after tick 1 |
-| `sunk_master`   | `sIter t i = t` for the sinks (#2, #4, #5), 0 elsewhere |
-| `refused_master` | cumulative refusals are exactly zero for all ticks >= 1 under the canonical schedule | schedule-pinned (plumbing cadence) |
-| `fold_attempt` / `applyOp_attempt` | identity A, word-generic over any op sequence: refused + used grows by exactly the word's emit weight (`attempted = accepted + refused`), event by event | cadence-free (enduring) |
-| `fold_take` / `applyOp_take` | word-generic: consumed + miss grows by the word's consume weight; a consume on an empty box is a miss and removes nothing | cadence-free (enduring) |
-| `fold_event` / `applyOp_event` | identity B, word-generic: accepted (`used`) = consumed + sunk + delta-depth, carried through every event; refused copies never enter | cadence-free (enduring) |
-| `fold_append` | folds compose over concatenated words (`flowFold (l1 ++ l2) st = flowFold l2 (flowFold l1 st)`) | cadence-free (enduring) |
-| `fold_box_bounded` / `step_contraction` | INV-BOUNDS intra-tick (adjudicated): from any depth <= 1, depth <= 1 after *every prefix* of the event sequence | cadence-free (enduring) |
-| `emit_full_box` | multiplicity k onto a full box: the held event stays, all k extra copies refused as scalar charges, nothing buffered | cadence-free (enduring) |
-| `emit_empty_box` | multiplicity k + 1 onto an empty box: first arrival accepted, k refused | cadence-free (enduring) |
-| `cycle_warm_no_refusal` | cycle check pinned as a lemma: with the ordering hypothesis `opsOf i = [Op.consume, Op.emit]` lifted explicitly, consume empties the delay box before emit refills it -- refusal never fires on #10/#17 | policy-relative, ordering hypothesis explicit |
-| `cycle_burst_refuses_extras` | burst of k + 1 copies on a cycle flow, then its word: depth restored to 1, refusals grown by exactly k -- extras refused, nothing hovering | policy-relative, ordering hypothesis explicit |
-| `flow_attempts_raw` / `flow_take_raw` / `flow_event` | identities A/B and the take-split instantiated per flow per tick from the cold start | cadence-free (enduring) |
-| `emit_liveness` | per-op table: every flow's word emits exactly once (fids 1..27) |
-| `consume_sink_split` | per-op table: every flow either consumes once or is a sink (fids 1..27) |
-| `attempts_at_master` | identity A at the master profile: attempted = accepted = 1, refused = 0, per flow | schedule-pinned at the master profile |
-| `balance_at_master` | identity B at the master profile: accepted = consumed + sunk + depth, per flow per tick (delta-depth = box' - fbox i) | schedule-pinned at the master profile |
-| `geometry_write_channel_purity` | the payload kinds excluded from geometry (trajectory, delta, context) are absent from *both* D2 and D4 channel allow-lists | type-level, cadence-free (enduring) |
-| `geometry_writes_absorbed` | D4 writes are exactly flow #22 and D2 writes exactly {#18, #24}, all consume ops on the spine. Round 10: #18 is owned by 3.0 (the loop's candidate birth), so only #22/#24 are ratchet-owned | topology-level, cadence-free (enduring) |
-| `matTick_length` | one matTick step preserves the capacity bound (given a compliant board) | step law, cadence-free (enduring) |
-| `mat_operational_policy` | closed form `run (t+3) = replicate 2 (t+2) ++ replicate 2 (t+3)` for **every** stream obeying the update law (`run 0 = [0]`, one matTick per tick) | policy-relative, schedule explicit |
-| `mat_fresh_policy` | INV-NO-OSSIFY for every stream obeying the update law: every resident epoch equals *t* or *t−1* | policy-relative, schedule explicit |
-| `mat_bounded_policy` | capacity bound for every stream obeying the update law | policy-relative, schedule explicit |
-| `mat_operational` / `mat_fresh` / `mat_bounded` | the same three statements, specialized to the dry-run minter (`matRun`) | corollaries of the policy theorems; the minter provably satisfies the law |
-
-Proof architecture: per-flow *warm* facts (one tick from zero) and *step*
-facts (one tick from the master profile) — the concrete fid arms discharge
-by kernel `rfl`, the case split over fids is one 28-arm match plus a tail
-arm — then short tick-inductions plus a fold induction over op words. No
-axioms, no `sorry`; core Lean 4 only.
+Summary (physics mode): **10/16 non-read flows derived**
+({3, 6, 10, 12, 16, 17, 18, 19, 22, 24}), **6/16 placeholders**
+({1, 2, 4, 5, 9, 13}), and **11/11 store reads executor-derived**
+({7, 8, 11, 14, 15, 20, 21, 23, 25, 26, 27}).  D1 reads stay `None`
+because #13 is blocked and D1 is frozen.  The default synthetic dry run
+keeps its historical plumbing behaviour (every non-read flow `None` except
+the #18/#19/#22/#24 no-op/rotating bodies).
 
 ### Cadence audit: universal vs policy-relative (user-adjudicated)
 
@@ -255,25 +179,29 @@ How each user-supplied master invariant is currently verified:
 | --- | --- | --- | --- |
 | INV-BOUNDS | proven intra-tick (adjudicated round 7) + fuzzed | Lean `fold_box_bounded`/`step_contraction` (depth <= 1 after every event prefix), `boxes_bounded` (tick boundaries); Python `prefix_depth` tests, the executor `max_depth` event-boundary monitor, and the fuzz sweep | enduring |
 | INV-LIVENESS | proven + empirical + structural **in its current per-flow, per-tick form** | Lean `emit_liveness`; `test_invariants.TestLiveness` | plumbing-only; enduring form: liveness scoped to the always-on spine, the organ-owned writes (#18/#19/#22/#24) trigger-gated in the physics epoch |
-| INV-CYCLE-DELAY | **RE-SPEC PENDING (round 10)** — the machine proof stands on the corrected op table; the *justification* is replaced | Lean `boxes_master`; `cycle_warm_no_refusal` (ordering hypothesis explicit), `cycle_burst_refuses_extras` | plumbing-only (schedule-relative). **Provisional reading:** the delayed set is exactly {#10, #17}, and it is not justified by graph cycles — it is justified by **stage inversion** (P3→P1 and P5→P4, i.e. a consumer that also produces the consumed flow) **plus store-read injection** (13 injected channels incl. every store read). Encoded as a comment where the set is derived (`CYCLE_FLOWS` = flows whose op word starts with `consume`) |
+| INV-STAGE-ORDER (round 11; renamed from INV-CYCLE-DELAY) | **resolved** — the law is derived from the ledger, not from a cycle count | Lean `boxes_master`, `cycle_warm_no_refusal` (ordering hypothesis explicit), `cycle_burst_refuses_extras` (the delayed flows' warm-up profile, schedule-relative); `test_invariants.TestStageOrder` (4 tests). The delayed set is exactly {#10, #17} = the **stage-backward process edges**, computed at test time from `FLOW_LEDGER` + `SPINE` (P3→P1, P5→P4); every other process→process edge is stage-forward; all 11 store reads are injected at tick start. Tested: set equality, read injection, minimality (removing either delay makes a consumer precede its producer) and sufficiency. `dryrun.STAGE_BACKWARD_FLOWS` is read off the op word (`ops[0] == "consume"`), never off a census; `CYCLE_FLOWS` survives only as the Lean generator's alias | plumbing-only (schedule-relative) for the profile; the *law* is structural and enduring |
 | INV-CONSERVE | two exact identities per flow per tick, proven word-generically + empirical | Lean `fold_attempt`/`fold_event` (any op sequence), `attempts_at_master`/`balance_at_master`; `test_accounting` identities A/B; overflow preserves both verbatim under reject-with-charge | enduring |
-| INV-EXHAUST | **RE-SPEC PENDING (round 10)** | Lean `sunk_master` (sinks #2, #4, #5 unchanged on the corrected graph). **Provisional reading:** the sink profile stays {#2, #4, #5}, but #27 (D3→P1, read) is restored as a residue edge into the transducer; the old "no residue edge back into transduction" reading is VOID (`test_thermodynamics.test_residue_edge_is_the_dissipation_exit`), and #27's payload type (flow / charge / scalar drain) is under adjudication | plumbing-only (linear growth = per-tick schedule) |
+| INV-EXHAUST | **resolved** (round 11) — #27 is a real flow and the one destructive read | `test_invariants.TestExhaust` (4), `test_thermodynamics` (dissipation-exit test). Terminal sinks are exactly {#2, #4, #5}; the dissipation chain is `D3 --#27--> P1 --#5--> E1`; #27 drains residual + expired cohorts **destructively** at P1's consume (refused copies never drain), and no D3 material is re-stored as state after #27 — only resident cohorts can be re-read (#20/#21/#26). Sink rates from Lean `sunk_master` | plumbing-only for rates; the chain and the destructive read are design |
 | INV-CAUSAL | structural | `test_invariants.TestCausal` | enduring |
-| INV-GEOMETRY | **RE-SPEC PENDING (round 10)** — the old `{D2, D4}` ratchet-only reading is withdrawn | `test_invariants.TestGeometry`; Lean `geometry_write_channel_purity`, `geometry_writes_absorbed`. **Provisional reading:** writer sets are D1:{P4}, D2:{P3, P6}, D3:{P5}, D4:{P6}; **D4 is the only ratchet-exclusive store** and D2 is a nursery with two owners (#18 birth by 3.0, #24 write-back by 6.0). Type-system purity is unchanged | provisional (structural) |
+| INV-GEOMETRY | **resolved** (round 11) — three tiers + **per-flow** kind pins | `test_invariants.TestGeometry` (3), `test_payloads`/`test_design_intent` pins; Lean `geometry_write_channel_purity`, `geometry_writes_absorbed`, `d2_write_split`, `candidate_recorded_from_birth`. Tiers: **D4 parametric** ({P6 #22} only, `BiasPrimitive`); **D2 nursery** — a separate candidate index written only by #18 (`EmergentCrystalBody`) and the overlay index written only by #24 (`MatOverlay`), two indices in `MatBoard`, not a tagged stream; **D1/D3 operational** (D1←P4 #13, D3←P5 #19). A per-store whitelist is not used: `PAYLOAD_SCHEMA[fid]` pins one exact type per write flow, so a candidate cannot be born through the overlay path or vice versa. Purity is unchanged and `mat_*_policy` is untouched (same overlay-index law) | structural/type-level (enduring); the candidate index adds its own Lean lifecycle block |
 | INV-NO-OSSIFY | typed + proven (schedule explicit) + empirical | Lean `mat_fresh_policy`/`mat_fresh`, `mat_bounded_policy`/`mat_bounded`; `test_payloads` lifecycle/integration | enduring (statement); current proof policy-relative to the mat law, hypothesis explicit |
 | INV-EMPTINESS | typed by construction + proven | `MatOverlay`/`BiasPrimitive` exact-type whitelist; Lean `geometry_write_channel_purity`; `test_payloads` trajectory-rejection | enduring |
-| INV-PROVENANCE (round 8) | carrying + ordering closed, structural anti-mint checked; derivation **partial** | A2 `Envelope(Provenance(source_fid, tick_born), body)`; `require_channel_provenance`; `test_provenance` (48 tests incl. executor continuity); `test_payloads.TestEmissionProvenance`; coverage table above | enduring (statement); #2/#4/#5/#9/#13/#16 stay placeholders and D3 is not read yet |
+| INV-PROVENANCE (round 8; round 11) | carrying + ordering closed, structural anti-mint checked; derivation **10/16 non-read flows** | A2 `Envelope(Provenance(source_fid, tick_born), body)`; `require_channel_provenance`; `test_provenance` (executor continuity for every store read including #20/#21/#23/#26/#27); `test_payloads.TestEmissionProvenance`. Round 11: #16 is now derived at P3 (no D1 dependency) and #16's identity is pinned (`error == #12.surprise`, `cost == ||#12.delta||₂`); placeholders are exactly {1,2,4,5,9,13}; all 11 store reads are executor-derived | enduring (statement); #13/#16 provenance slice still partially blocked (#13 stays blocked; D1 reads are frozen placeholders) |
 | INV-PATCH (round 8; round 9a) | Python-asserted, **tested-not-proven** (Lean bounds records only) | `MatBoard` patch table keyed `overlay_id` (Q1-A): record and patch evict atomically on the capacity, byte-ceiling and organ paths; `MAX_PATCH_BYTES=262,144` per patch, `MAX_PATCH_TOTAL_BYTES=1,048,576` per table. Round 9a applies the evidence-derived bound **first**: `K ≤ 5·N·64` (`amateur/physics/capacity.py`), low-rank `head.2` patch `K(r)=192r+64`, 20,224 B at N=16 (rank 26); dense head+norm (34,240) and full (210,920) are inadmissible; `test_physics_capacity`, `test_physics_run.TestPatchAccounting` | physics epoch; substance bound not proved, patch map is in-memory (persistence absent) |
 | INV-SOURCE (round 8) | structural + tested (no silent fallback) | content-only `PayloadSource` (Q2-A); fixed `PLACEHOLDER_FLOWS` dispatch that never reads the ledger; `PhysicsSource.derive_body` raises before any arrival; a source failure leaves every charge counter at 0; `test_physics_run.TestSourceSelection`/`TestCoverageLedger`/`TestSourceFailureIsNotACharge` | enduring (contract); physics producer partial |
 | INV-ATOMIC (round 8; round 9a) | tested (fail-closed) | record+patch atomicity on every path: capacity, byte ceiling, organ-driven evict; round 9a refuses `patch="full"` at the capacity gate **before any fit/overlay**, and the outer byte-ceiling path is exercised with a synthetic oversized patch (asserted in the derivation pass before any arrival, no state change); `MatBoard` guard rails (validate-before-pop revalidation, duplicate-birth rejection, exactly-one `evict_record`); `test_payloads.TestMatBoardGuardRails`/`TestMatBoardPatches`, `test_physics_run.TestFullPatchModeFailsClosed` | enduring (Python); Lean bounds records only |
 | INV-CAPACITY (round 9a) | derivation + tests (arithmetic; not proved in Lean) | `K ≤ γ·N·D` with γ=5.0, N = real evidence transitions used, D=64 (`amateur/physics/capacity.py`); last-layer low-rank patch `K(r)=192r+64`, `r_max=min(floor((γND−D)/192),64)`, `nbytes=4K`; N=4 → rank 6 / K=1,216 / 4,864 B; N=16 → rank 26 / K=5,056 / 20,224 B; N≥64 → rank 64 / K=12,352 / 49,408 B; dense 34,240 and full 210,920 refused at every N; outer byte ceilings are storage bounds only; `test_physics_capacity` (11) | physics epoch; γ=5.0 is pre-registered design slack, not measured; not proved in Lean |
 | INV-VALIDATION (round 9a) | tested (state-based; no-peek asserted) | pre-adoption proposal at frame 16; paired candidate-vs-base validation on held-out ticks 17–18 of the same stream; birth only if `candidate_mean < base_mean` strictly, decision at 18; rejection record reason `interference` with both means; no birth/activation on reject; `test_physics_organ.TestPreAdoptionValidation`, `test_physics_run.TestPreAdoptionValidation` | physics epoch; `validation_window=2` == `stale_patience` (documented); one candidate at a time; trigger-gating (9b) not in scope; **scope: executor proposal path only** — the organ's legacy ratchet birth path (`_decide_tick → _adopt_or_revalidate → _fit_overlay → birth`) remains unvalidated, and the 0.8226 bank ratio is a fit-quality diagnostic, not validation evidence (design §15.3, notes 40–41) |
-| INV-ADAPTATION / ADMISSION (round 9a; pre-registered closeout) | tested (one trace, two gates) | design §15.10 definitions: **ADAPTATION** = mean adapted/base over overlay-active ∩ `phase == "flipped"` rows < 1.0 — seed-7 frames 19–27 (n=9), 0.25469933084115787 / 0.2635077436765035 = **0.9665724706513396** → **PASS**; **ADMISSION** = mean adapted/base over **all** overlay-active rows < 1.0 — frames 19–32 (n=14), 0.3444968502626556 / 0.3293016486402069 = **1.0461437156029878** → **FAIL**, the round's primary finding (the 2-tick validation admitted a patch whose bounded lifetime harm exceeded its benefit; the online stale rule protected the trace, validation did not). Both computed from the same trace; `forward_ratio` = ADMISSION, `forward_ratio_flip_only` = ADAPTATION; `test_physics_run.TestSingleStreamAcceptance.test_adaptation_gate_passes_on_the_flipped_window` pins ADAPTATION, the strict `@expectedFailure` on `...test_single_stream_surprise_drops` pins ADMISSION | physics epoch; admission policy deferred to Round 9c (gating changes the birth regime; re-measure lifetime net benefit under the gated cadence first) |
+| INV-ADAPTATION / ADMISSION | **superseded for round 11 by design §15.11**; the 9a numbers are historical | 9a (live-overlay) gates — ADAPTATION 0.9665724706513396 PASS, ADMISSION 1.0461437156029878 FAIL — were measured on the old 26-flow topology and are retained as history, never re-asserted. Round 11 re-registers them on the new evidence: **ADAPTATION** = mean shadow adapted/base over shadow-scored ∩ flipped rows < 1.0; **ADMISSION** = count of promoted candidates with residence ratio ≥ 1.0 == 0. Definitions in design §15.11 (written before measurement); pinned in `test_physics_run` | physics epoch; admission *policy* still deferred |
 | INV-RESET (round 8; round 9a) | tested | `PhysicsOrgan.reset_p6_state()` clears decisions/pending/cooldown/gate evidence/overlay table/fit history; `PhysicsRun.reset()` calls it; two consecutive `acceptance()` runs are identical (round 9a: proposal 16, birth 18, stale 31, evict 35, all-active 1.0461437156029878, flip-only 0.9665724706513396, 11 D4 sediments, clean end state); `test_physics_run.TestResetRepeatability` | enduring (harness contract); needed for the registered trace to be repeatable |
-| INV-ZERO-CONF (round 8; round 9a) | tested by serialized-bytes equality + identity B | #22 is the **derived** gate output (Q4-A): it passes only when an overlay is active and cumulative adapted < base evidence exists, confidence `clamp(1-adapted/base,0,1)`; production publishes evidence after `stale_patience` (2) applied ticks, disclosed. Round 9a's capacity-bounded patch is genuinely beneficial while active, so the gate passes on **real** evidence: 11 real sediments (frames 21–31), 25 confidence-0 no-ops, `11+25=36`; the retained prefix is byte-identical and object-identical (no test double), and the gate blocks again after eviction. **D4 criterion adjudicated (2026-11-20): the retained-contents reading is correct and met; the round-8 "no writes at all" reading is rejected** (it contradicts the ratchet's purpose and would need an executor dedup rule; design §15.10). `test_physics_run.TestZeroConfidenceGate` (8 tests) | physics epoch; the passing branch is now real, not injected; D4 reading closed |
+| INV-ZERO-CONF (round 8; round 11) | tested by serialized-bytes equality + identity B | #22 is a **derived** gate output (Q4-A), now derived from the #23 residence evidence: `qualified` survivor → `BiasPrimitive(confidence=clamp(1-ratio,0,1), candidate_lineage=candidate_id)`; anything else → the zero-confidence sentinel, absorbed as a consumed no-op with no promotion and no D4 change. **D4 criterion adjudicated (2026-11-20): the retained-contents reading is correct and met; the round-8 "no writes at all" reading is rejected** (design §15.10) | physics epoch; the passing branch is real, not injected; D4 reading closed |
+| INV-MASS (round 11) | tested; asserted every tick | `DebrisPool.mass_balance()`: `deposits == resident + drained + evicted` at cohort level, plus a separate issuance account (promoted / resident_unpromoted / drained_unpromoted) and `reads_by_kind`; random-sequence test in `test_payloads`, per-tick assertion in `test_dryrun`; measured 1000-tick synthetic run `4000 = 32 + 999 + 2969`, ceiling evictions 0. **Flagged:** ruling (F)'s `in = out reads + drained + Δresident` is not a conservation law while reads are non-destructive, so the conservation-correct identity is the one asserted and reads are accounted separately | tested-not-proven (Python) |
+| INV-PROMOTE-ONCE (round 11) | tested (Python) + proved for the candidate index | D3: `DebrisPool.promote` refuses a second promotion of the same cohort. D2: Lean `nursery_promote_resident` / `nursery_promote_once` / `nursery_promote_twice` (an id promoted out is never re-admitted, so it cannot be promoted twice), and `nursery_birth` refuses any id ever seen | enduring (statement) |
+| INV-LINEAGE (round 11) | tested, physics mode only, fail-closed | #24 `motif_lineage` must equal this tick's consumed #21 motif; #22 positive sediment requires `candidate_lineage` = the #23 survivor consumed this tick, still resident, and **qualified**; the candidate is promoted before the sediment. A violation is an `AssertionError` (wiring defect), never a charge. The #23 survivor read carries `qualified` as a flag, so a harmful candidate is surfaced and refused rather than pre-filtered away | physics epoch |
+| INV-NURSERY (round 11) | typed + tested + proved (index law) | D2 candidate index: `NURSERY_CAPACITY=4` FIFO birth, ids never resurrected, `residence_ticks = shadow observations`, `RESIDENCE_N=4` pre-registered, candidate patch counted in D2 bytes (`patch_bytes` covers both indices), promotion/eviction remove record+patch atomically; Lean nursery block proves boundedness, birth membership, one-tick residence, distinctness and promotion-once | enduring (law); the constants are design pins |
 | INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` | enduring |
 | INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` | plumbing-only in current form (inherits LIVENESS's cadence); enduring form follows the spine-scoped liveness |
-| INV-CENSUS | **RE-SPEC PENDING (round 10)** — figures recomputed from the corrected ledger | `test_recurrence` census (computed independently by Tarjan + simple-cycle DFS): **24** interior simple cycles; raw membership \|Cycles(D1)\|=12, \|Cycles(D2)\|=11, \|Cycles(D3)\|=15, \|Cycles(D4)\|=4, with zero 2-/3-hop loops through D4 (shortest D4 cycle is 5 hops) — D4 is still the structurally insulated store | provisional (pure topology) |
+| INV-CENSUS | **resolved as a derived fingerprint** (round 11) | `test_invariants.TestCensus` (3): the census is **computed from `FLOW_LEDGER` at test time** (node-distinct simple cycles, canonical rotation, parallel edges collapsed) — 26 total / 24 interior / D1=12, D2=11, D3=15, D4=4, D3 has no 2-cycle, D4 minimum 5, D2 nursery loop D2→P2→P3→D2. The literals are **regression expectations, not the source of truth**: `test_inv_census_is_derived_not_listed` perturbs the ledger and shows the fingerprint moves. Evidence for structural richness / no degenerate store, never for dynamics. **Tested-not-proven**; no Lean change | evidenced (tested-not-proven) |
 | D4 sediment cadence (#22 one per tick), #18 birth cadence | factual in the dry run | `test_payloads` lifecycle | plumbing-only (harness artifact; 6.0 is an interference-checked gate, not a metronome) |
 | #18 edge | **VOID — superseded by the round-10 spec correction** | `v0.10-untested.md` round-10 audit record + superseded readings; `test_design_intent.TestCrystalLexicon` now pins the corrected wiring (3.0→D2) and the absence of 5.0→6.0; the crystal lexicon is explicitly non-authoritative until adjudicated | closed as a reading, **not** as a payload decision (see the provisional choices above) |
 
@@ -582,15 +510,14 @@ tick, `attempted == accepted` on every tick, refusals 0, sinks {2: 1000,
 **355 tests, OK (1 expected failure)**. `gen_lean` output byte-identical to
 `formal/DryRun.lean`; Lean compiles (2.1 s).
 
-**Provisional decisions pending user adjudication** (marked PROVISIONAL in
-code): #18 = `MatOverlay` status `candidate` (nursery birth); #23 = the
-stored D2 head record; #20/#21/#27 = `None`; #16 stays `None`. Open
-tension: the task said "do not attach a predictor patch to a candidate",
-but the Q1-A absorb path still attaches the validated organ patch to the
-#18 commit — dropping it would leave the D2 substance accounting unowned
-and break the pinned patch measurements. Flagged in
-`amateur/physics/run.py` (`_candidate`, `on_commit`) as an adjudication,
-not a settled reading.
+**Provisional decisions — ALL RESOLVED in Round 11** (see the Round-11
+closeout below and `docs/round11-record.md`): #18 is now the
+`EmergentCrystalBody` nursery kind (not a `MatOverlay` status); #23 reads
+the nursery survivor with its residence evidence; #20/#21/#26/#27 carry
+real tagged D3 cohort bodies; #16 is derived at P3. The "candidate carries
+a predictor patch" tension was adjudicated (ruling E): the candidate does
+carry the patch **as substance**, shadow-scored every resident tick and
+never applied to behaviour, with live patches arriving only via #24.
 
 **Historical measurements.** Every physics-epoch measurement recorded
 above (rounds 7–9a: the 0.9079 validation ratio, ADAPTATION 0.9666 /
@@ -609,3 +536,30 @@ superseded by this correction.
 - Layer 3 catches executor-only state (counters, drains, evictions,
   payload emissions) that the pointwise model does not cover.
 - Layer 4 catches code that satisfies the ledger but betrays the text.
+
+## Round 11 closeout (rulings A–G)
+
+Measured on the corrected 27-flow graph, after the Round-11 implementation:
+
+| Check | Result |
+| --- | --- |
+| suite | **431 tests, OK, 0 skipped, 0 expected failures** (50–63 s) |
+| `python3 tools/gen_lean.py \| diff - formal/DryRun.lean -` | empty (byte-identical) |
+| `lean formal/DryRun.lean` | exit 0, **76 theorems**, zero `sorry`, zero `axiom`, 2.3–3.4 s |
+| op table vs Round-10 HEAD | **byte-identical** (no mailbox theorem restated) |
+| 1000-tick canonical dry run | liveness 27/27, accepted 27,000, refused 0, sinks `{2:1000, 4:1000, 5:1000}`, misses `{10:1, 17:1}`, `max_depth ≤ 1`, in transit `{10:1, 17:1}` |
+| D3 mass balance (1000-tick synthetic) | `4000 = 32 + 999 + 2969`, ceiling evictions 0 |
+| registered physics run (seed 7, 36 ticks) | ADAPTATION **0.9555247158775397** (n=8) PASS; ADMISSION **0 harmful / 1 promotion** PASS; #23 surfaced-and-refused a harmful survivor on 4 real ticks |
+| control (seed 0) | 0 promotions, but **vacuously** (no candidate forms under the registered trigger) — reported as finding |
+| reachability | motif cohorts **0** on both single-stream seeds (`MOTIF_MIN_PERSISTENCE=10`, `MOTIF_MIN_COUNT=4` unreachable); #21→#24 demonstrated by a bank probe and an executor wiring test only — reported as finding |
+
+The Round-11 findings (motif reachability, vacuous control, knife-edge
+promotion, structural ADMISSION, out-of-sample evidence convention,
+mass-balance formula, drift placeholder) and the Round-12 adjudication list
+are in `docs/round11-record.md` §3–§4. The pre-registered gate text is
+`docs/phase4-5-design.md` §15.11 (written before the run).
+
+**Historical. ** The Round-10 figures above (355 tests, the Round-10 dry-run
+and fuzz numbers) remain the record of that round; the 27-flow op table is
+unchanged, so the mailbox profile above reproduces them exactly, and they
+are restated here only as a reproduction check, not as new evidence.

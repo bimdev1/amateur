@@ -26,9 +26,11 @@ import unittest
 
 from amateur.ledger import FLOW_LEDGER
 from amateur.payloads import (
+    READ_BODY,
+    WRITE_BODY,
     BiasPrimitive,
-    D2_WRITES,
-    D4_WRITES,
+    DigestedDebrisBody,
+    EmergentCrystalBody,
     MatOverlay,
     PAYLOAD_SCHEMA,
 )
@@ -146,25 +148,42 @@ class TestTickOrdering(unittest.TestCase):
         self.assertEqual(derived_at(Envelope(prov, _overlay()), 3), prov)
 
 
+def _write_body(fid: int) -> object:
+    if fid == 18:
+        return EmergentCrystalBody("cand-0", (0.0,) * 64, 0.0, 1)
+    if fid == 24:
+        return MatOverlay(1, "ovr-0", "active")
+    if fid == 22:
+        return BiasPrimitive("bias-0", 0.4)
+    if fid == 19:
+        from amateur.payloads import DigestedDebrisBody
+
+        return DigestedDebrisBody("debris-0", ())
+    raise AssertionError(f"no write body for #{fid}")
+
+
 class TestEnvelopeWhitelist(unittest.TestCase):
     def test_exact_bodies_are_accepted(self) -> None:
-        for fid in D2_WRITES:
-            body = MatOverlay(1, "ovr-0", "active")
+        for fid in WRITE_BODY:
+            body = _write_body(fid)
             env = Envelope(Provenance(fid, 1), body)
             self.assertTrue(allowed_envelope(fid, env), msg=f"#{fid}")
             self.assertIs(require_envelope(fid, env, 1), env)
-        for fid in D4_WRITES:
-            body = BiasPrimitive("bias-0", 0.4)
-            env = Envelope(Provenance(fid, 1), body)
+
+    def test_read_channels_accept_none_and_their_exact_body(self) -> None:
+        for fid in READ_BODY:
+            env = Envelope(Provenance(fid, 1), None)
             self.assertTrue(allowed_envelope(fid, env), msg=f"#{fid}")
 
     def test_body_subclasses_are_still_rejected(self) -> None:
-        for fid in D2_WRITES:
-            env = Envelope(Provenance(fid, 1), Sneaky(1, "x", "active"))
+        for fid in WRITE_BODY:
+            env = Envelope(
+                Provenance(fid, 1), Sneaky(1, "x", "active")
+            )
             self.assertFalse(allowed_envelope(fid, env), msg=f"#{fid}")
             with self.assertRaises(TypeError):
                 require_envelope(fid, env, 1)
-        for fid in D4_WRITES:
+        for fid in WRITE_BODY:
             env = Envelope(Provenance(fid, 1), Smooth("x", 0.5))
             self.assertFalse(allowed_envelope(fid, env), msg=f"#{fid}")
             with self.assertRaises(TypeError):
@@ -179,14 +198,14 @@ class TestEnvelopeWhitelist(unittest.TestCase):
     def test_cross_channel_bodies_are_rejected(self) -> None:
         overlay_env = Envelope(Provenance(22, 1), _overlay())
         bias_env = Envelope(Provenance(23, 1), BiasPrimitive("b", 0.5))
-        for fid in D4_WRITES:
+        for fid in (22,):
             self.assertFalse(allowed_envelope(fid, overlay_env))
-        for fid in D2_WRITES:
+        for fid in (18, 24):
             self.assertFalse(allowed_envelope(fid, bias_env))
 
     def test_raw_payload_is_not_accepted_at_the_channel(self) -> None:
-        for fid in D2_WRITES | D4_WRITES:
-            body = _overlay() if fid in D2_WRITES else BiasPrimitive("b", 0.5)
+        for fid in WRITE_BODY:
+            body = _overlay()
             self.assertFalse(allowed_envelope(fid, body), msg=f"#{fid}")
             with self.assertRaises(TypeError):
                 require_envelope(fid, body, 1)
@@ -202,7 +221,7 @@ class TestEnvelopeWhitelist(unittest.TestCase):
         )
 
     def test_write_channels_reject_an_empty_body(self) -> None:
-        for fid in D2_WRITES | D4_WRITES:
+        for fid in WRITE_BODY:
             self.assertFalse(
                 allowed_envelope(fid, Envelope(Provenance(fid, 1), None))
             )
@@ -424,8 +443,15 @@ class TestExecutorContinuity(unittest.TestCase):
         by_birth = {
             (envelope.provenance.source_fid,
              envelope.provenance.tick_born): envelope
-            for _tick, _fid, envelope in self.events
+            for _tick, fid, envelope in self.events
+            if fid not in STORE_READ_FIDS
         }
+        all_cohort_ids: set[str] = set()
+        for _tick, fid, envelope in self.events:
+            if fid == 19 and envelope.body is not None:
+                all_cohort_ids.update(
+                    cohort.cohort_id for cohort in envelope.body.cohorts
+                )
         for tick, fid, envelope in self.events:
             if fid not in STORE_READ_FIDS or envelope.body is None:
                 continue
@@ -438,11 +464,38 @@ class TestExecutorContinuity(unittest.TestCase):
             ]
             if fid == 7:
                 self.assertIs(envelope.body, producer.body)
-            else:
+            elif fid in (8, 25):
                 self.assertEqual(
                     producer.body.overlay_id,
                     envelope.body.overlay_id,
                     msg=f"tick {tick} read #{fid}",
+                )
+            elif fid in (20, 26):
+                read_ids = {
+                    cohort.cohort_id for cohort in envelope.body.cohorts
+                }
+                self.assertTrue(
+                    read_ids <= all_cohort_ids,
+                    msg=f"tick {tick} read #{fid}",
+                )
+                self.assertIn(
+                    (provenance.source_fid, provenance.tick_born), by_birth
+                )
+            elif fid == 21:
+                self.assertIn(
+                    envelope.body.motif_id, all_cohort_ids,
+                    msg=f"tick {tick}",
+                )
+            elif fid == 23:
+                self.assertEqual(
+                    producer.body.candidate_id,
+                    envelope.body.candidate_id,
+                    msg=f"tick {tick}",
+                )
+            elif fid == 27:
+                self.assertTrue(
+                    set(envelope.body.cohort_ids) <= all_cohort_ids,
+                    msg=f"tick {tick}",
                 )
 
     def test_read_provenance_equals_the_tracked_head_provenance(self) -> None:
@@ -475,8 +528,10 @@ class TestExecutorContinuity(unittest.TestCase):
                  if tick == 1}
         for fid in (8, 25):
             self.assertEqual(first[fid].provenance, Provenance(23, 0))
+            expected_status = "active" if fid == 8 else "stale"
             self.assertEqual(
-                first[fid].body, MatOverlay(0, "ovr-0", "stale")
+                first[fid].body,
+                MatOverlay(0, "ovr-0", expected_status),
             )
 
     def test_d4_read_hands_back_the_exact_sedimented_object(self) -> None:
@@ -519,7 +574,7 @@ class TestStructuralAntiMint(unittest.TestCase):
             source.index("self._derive()"), source.index("_arrive(")
         )
 
-    def test_derive_fills_all_twenty_six_flows(self) -> None:
+    def test_derive_fills_all_twenty_seven_flows(self) -> None:
         run = DryRun()
         run.tick()
         self.assertEqual(set(run.derived), set(FLOW_IDS))

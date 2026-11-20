@@ -1354,6 +1354,15 @@ ends empty.
 
 ### 15.10 Pre-registered gates: ADAPTATION and ADMISSION (round 9a closeout)
 
+> **Historical record; superseded for Round 11 by §15.11.**  These two gates
+> are *live-overlay* gates and were measured on the old 26-flow topology.
+> Round 11's ruling (E) moves the evidence to the D2 nursery (a candidate
+> patch that never steers, shadow-scored per resident tick), so Round 11
+> re-registers ADAPTATION and ADMISSION in §15.11 against the shadow and
+> residence evidence.  Nothing in this section is re-asserted under the
+> corrected 27-flow graph; the 9a ratios below are historical numbers and
+> must not be quoted as current.
+
 Round 9a's phrase "mean adapted/base over the active flip window" conflated
 two different questions.  The user's closeout ruling (2026-11-20)
 pre-registers them as two gates with exact, computational definitions, both
@@ -1413,3 +1422,128 @@ never passes is not a gate) and would require an executor dedup rule, an
 ops-table change outside the physics epoch.  This adjudication supersedes
 the open question in note 33 and cannot be re-litigated by re-reading note
 23.
+
+---
+
+### 15.11 Round 11 pre-registration: residence-evidence gates (written before measuring)
+
+**Pre-registration ordering.** This section was written and committed to the
+worktree on 2026-11-20, from the adjudicated rulings A–G and the design
+constant `RESIDENCE_N = 4`, **before** the seed-7 Round-11 run existed. No
+number in it is a measurement. The measured values are appended below the
+table only after the run, and nothing in the definitions may be edited after
+the measurement.
+
+**Why a new pair of gates.**  §15.10's gates are *live-overlay* gates: both
+ratios are computed over rows where `row.overlay_id is not None`, i.e. where
+a fitted patch was actually steering the prediction.  Round 11's ruling (E)
+moves the evidence earlier in the lifecycle: a candidate is born into the D2
+nursery carrying a predictor patch as **substance only**, that patch never
+steers behaviour, and the loop's transition is continuously shadow-scored
+against the base predictor for every resident tick.  Only a candidate with
+qualifying residence evidence is surfaced by #23, and only a surfaced
+candidate may be consumed by #22 into D4.  ADAPTATION/ADMISSION therefore
+have to be re-registered against the new evidence source; §15.10 remains the
+historical record of the 9a gates and is not re-asserted (its numbers were
+measured on the old 26-flow topology).
+
+**Constants (pre-registered design constants, not measurements).**
+
+- `RESIDENCE_N = 4` — minimum number of shadow-scored ticks a candidate must
+  have accumulated before #23 may surface it.  Chosen to be strictly longer
+  than 9a's two-tick validation window, which is the window the hypothesis
+  says was starving the gate.
+- `gamma = 5.0` — unchanged capacity bound `K <= gamma * N * D` from 9a.
+
+**Computational predicates (one source of truth: the per-tick `RunTick` rows).**
+
+- *shadow-scored row*: a resident candidate was scored on that tick
+  (`row.shadow_ratio is not None`).
+- *flipped row*: `row.phase == "flipped"`.
+- *promoted candidate*: a candidate whose `#23` survivor read was consumed by
+  `#22` in the same tick, i.e. a real (non-zero-confidence) D4 sediment with
+  `candidate_lineage` naming it (`row.promoted_id is not None`).
+
+| Gate | Definition | PASS condition |
+| --- | --- | --- |
+| **ADAPTATION** (shadow) | mean over shadow-scored ∩ flipped rows of `shadow adapted / base` | `< 1.0` |
+| **ADMISSION** (residence) | count of promoted candidates whose final residence `ratio >= 1.0` | `== 0` |
+
+ADMISSION is deliberately a **count, not a ratio**: the round's question is
+whether a net-harmful candidate can be promoted at all, and one such
+promotion is a wiring defect regardless of how many good promotions
+surround it.  ADAPTATION is a mean over the perturbation-active intersection
+because that is the window the candidate's patch claims to help.
+
+**Scenario (fixed before the run).**  `warmup=8`, flip at tick 8,
+`post_flip=20`, flip back at tick 28, `recovery=8`; 36 executor ticks — the
+same shape 9a used so the round is comparable in *structure*, never in
+numbers.
+
+**Seeds.**  Seed 7 is the registered trace.  Seed 0 is the **rejection
+control**: its pre-registered expectation is **zero promotions** (a
+candidate that loses residence evidence, or never qualifies, is not
+surfaced, and nothing reaches D4 through it).  A seed-0 promotion is reported
+as a finding; it is not tuned away.
+
+**Pre-registered hypothesis.**  Residence-time shadow evidence fixes the
+admission failure: a candidate that is net-harmful while resident
+(`ratio >= 1.0`) must be refused promotion by the gate, because the gate now
+reads N-tick residence evidence instead of a 2-tick snapshot.
+
+**Falsifier.**  If a candidate with net-harmful residence evidence is still
+promoted, the gate is not reading its evidence: that is a **wiring defect**,
+reported as the round's finding, not reconciled by changing a threshold.
+
+**Reported but not gated (measured state).**
+
+1. The seed-7 residence-evidence curve, per resident tick:
+   `(candidate_id, residence_ticks, adapted_mean, base_mean, ratio,
+   qualified)`.
+2. The lifecycle event ticks on both seeds: candidate birth (#18), first
+   shadow tick, survivor read (#23), sediment (#22), motif read (#21), live
+   overlay (#24), stale (#25), eviction, #19 deposit, #27 drained cohorts,
+   #5 exit.
+3. D4 retained contents byte-identical across the run; encoder
+   bit-identical; zero-confidence #22 absorbed as a consumed no-op; identity
+   B every tick.
+4. The D3 mass balance `deposits == resident + drained + evicted` after
+   every tick, and the byte-ceiling resolution (drained vs. evicted).
+
+**Policy deferral.**  No admission *policy* is chosen in this section and no
+threshold may be tuned after seeing the numbers.  If the gates fail, the
+failure is the finding.
+
+#### 15.11.1 Measured results (appended after the run; definitions above unchanged)
+
+| Gate | Measured | Verdict |
+| --- | --- | --- |
+| ADAPTATION (shadow) | **0.9555247158775397**, n = 8 shadow-scored ∩ flipped rows | **PASS** (`< 1.0`) |
+| ADMISSION (residence) | **0** harmful of 1 promotion | **PASS** (`== 0`), and non-vacuously exercised: the harmful survivor was surfaced on four real ticks (ratios 1.009547 / 1.023553 / 1.019522 / 1.002973, `qualified=False`) and refused |
+
+Seed 7 residence curve (per resident tick) and the lifecycle ticks are in
+`docs/round11-record.md` §2.  Seed 7: candidate born t19, first shadow t20,
+first survivor t23, refused t23–t26, promoted t27, sediment lineage
+`cand-01`; D4 = 1 sediment, 35 zero-confidence no-ops, retained contents
+byte-identical; D3 `12 = 4 resident + 8 drained + 0 evicted`; end state
+clean; encoder bit-identical.  Seed 0: **no candidate is born** under the
+registered trigger (spikes at frames 9–14 precede the fit window), so its
+pre-registered zero-promotion expectation is met **vacuously** — recorded
+as finding F2, not as evidence.
+
+**Two conventions were fixed during implementation and are disclosed here
+because they move or could move a number:**
+
+1. **Out-of-sample shadow evidence.**  The birth tick's transition is
+   in-sample (the fit saw it) and cannot be carried by the store (the
+   annotation hook runs before #18 commits), so a candidate's evidence
+   starts one tick after birth.  Under the literal alternative — counting
+   the in-sample birth transition — ADAPTATION would be **1.0077 → FAIL**.
+   The convention was introduced for the structural reason, not for the
+   verdict; the Lead ratified it on those grounds and the user may overrule
+   it with that consequence.
+2. **Aggregation.**  ADAPTATION is the mean of per-tick ratios (per the
+   wording above); the `qualified` flag uses the ratio of means.  The two
+   differ materially here (0.9555 vs 0.999225 at promotion, where the
+   candidate crossed by 0.08 %).  One convention should be pinned for
+   Round 12.
