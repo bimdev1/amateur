@@ -26,15 +26,36 @@ from amateur.payloads import (
     D2_WRITES,
     D4_FLOWS,
     D4_WRITES,
+    DEBRIS_CAPACITY,
+    DEBRIS_MAX_BYTES,
+    MAX_PATCH_BYTES,
+    MAX_PATCH_TOTAL_BYTES,
     MAT_CAPACITY,
     MAT_SEED,
+    NO_DEBRIS_ID,
+    NOOP_OVERLAY_ID,
+    REAL_BODIES,
     BiasPrimitive,
+    CollapseMandateBody,
+    DebrisPool,
+    DigestedDebrisBody,
+    EmergentCrystalBody,
+    FrameBody,
+    LatentRolloutBody,
     MatBoard,
     MatOverlay,
     PAYLOAD_SCHEMA,
+    PredictionErrorBody,
+    StateDeltaBody,
+    StructuralMotifBody,
     allowed_payload,
+    noop_debris,
+    noop_mandate,
+    noop_motif,
+    noop_overlay,
     require_payload,
 )
+from amateur.provenance import Envelope, Provenance
 
 _TURNS = 200
 
@@ -80,7 +101,13 @@ class TestSchema(unittest.TestCase):
                 PAYLOAD_SCHEMA[fid], frozenset({BiasPrimitive, type(None)})
             )
         for fid in set(range(1, 27)) - D2_FLOWS - D4_FLOWS:
-            self.assertEqual(PAYLOAD_SCHEMA[fid], frozenset({type(None)}))
+            if fid in REAL_BODIES:
+                self.assertEqual(
+                    PAYLOAD_SCHEMA[fid],
+                    frozenset({REAL_BODIES[fid], type(None)}),
+                )
+            else:
+                self.assertEqual(PAYLOAD_SCHEMA[fid], frozenset({type(None)}))
 
     def test_inv_emptiness_trajectory_unrepresentable(self) -> None:
         for fid in D2_WRITES | D4_WRITES:
@@ -155,48 +182,54 @@ class TestExecutorIntegration(unittest.TestCase):
         cls.events = cls.dry.emissions
 
     def test_inv_emptiness_no_trajectory_ever_reaches_d4(self) -> None:
-        for tick, fid, payload in self.events:
+        for tick, fid, envelope in self.events:
             if fid in D4_FLOWS:
+                body = envelope.body
                 self.assertIsInstance(
-                    payload,
+                    body,
                     (BiasPrimitive, type(None)),
-                    msg=f"tick {tick} flow #{fid}: {type(payload).__name__}",
+                    msg=f"tick {tick} flow #{fid}: {type(body).__name__}",
                 )
 
     def test_d2_channels_carry_overlays(self) -> None:
-        for tick, fid, payload in self.events:
+        for tick, fid, envelope in self.events:
             if fid in D2_FLOWS:
+                body = envelope.body
                 self.assertIsInstance(
-                    payload,
+                    body,
                     (MatOverlay, type(None)),
-                    msg=f"tick {tick} flow #{fid}: {type(payload).__name__}",
+                    msg=f"tick {tick} flow #{fid}: {type(body).__name__}",
                 )
 
     def test_stale_read_pairs_with_same_tick_ratchet_write(self) -> None:
-        by_tick: dict[int, dict[int, object]] = {}
-        for tick, fid, payload in self.events:
-            by_tick.setdefault(tick, {})[fid] = payload
-        for tick, payloads in by_tick.items():
+        by_tick: dict[int, dict[int, Envelope]] = {}
+        for tick, fid, envelope in self.events:
+            by_tick.setdefault(tick, {})[fid] = envelope
+        for tick, envelopes in by_tick.items():
             self.assertEqual(
-                payloads[25].overlay_id,
-                payloads[24].overlay_id,
+                envelopes[25].body.overlay_id,
+                envelopes[24].body.overlay_id,
                 msg=f"tick {tick}: #25 read is not what #24 ratcheted",
             )
-            self.assertEqual(payloads[25].status, "stale")
-            self.assertEqual(payloads[24].status, "active")
+            self.assertEqual(envelopes[25].body.status, "stale")
+            self.assertEqual(envelopes[24].body.status, "active")
+            # The read predates the same-tick rewrite; it inherits the
+            # stored record's provenance, not #24's new birth stamp.
+            self.assertLess(envelopes[25].provenance.tick_born, tick)
 
     def test_epochs_strictly_increase_per_overlay(self) -> None:
         seen: dict[str, int] = {}
-        for tick, fid, payload in self.events:
+        for tick, fid, envelope in self.events:
             if fid in D2_WRITES:
-                prior = seen.get(payload.overlay_id)
+                body = envelope.body
+                prior = seen.get(body.overlay_id)
                 if prior is not None:
                     self.assertGreater(
-                        payload.epoch,
+                        body.epoch,
                         prior,
-                        msg=f"{payload.overlay_id} epoch frozen at tick {tick}",
+                        msg=f"{body.overlay_id} epoch frozen at tick {tick}",
                     )
-                seen[payload.overlay_id] = payload.epoch
+                seen[body.overlay_id] = body.epoch
 
     def test_no_resident_ever_stale_beyond_one_tick(self) -> None:
         run = DryRun()
@@ -210,9 +243,9 @@ class TestExecutorIntegration(unittest.TestCase):
         run = DryRun()
         run.run(_TURNS)
         read_ids = {
-            payload.overlay_id
-            for _t, fid, payload in run.emissions
-            if fid == 25 and payload is not None
+            envelope.body.overlay_id
+            for _t, fid, envelope in run.emissions
+            if fid == 25 and envelope.body is not None
         }
         self.assertTrue(run.board.evictions, msg="no evictions ever fired")
         for oid, _epoch, _tick in run.board.evictions:
@@ -222,6 +255,283 @@ class TestExecutorIntegration(unittest.TestCase):
         self.assertEqual(len(self.dry.board.d4), _TURNS)
         for bias in self.dry.board.d4:
             self.assertIsInstance(bias, BiasPrimitive)
+
+
+class TestEmissionProvenance(unittest.TestCase):
+    """A2 at the channel: every emission is an envelope, reads inherit the
+    stored record's provenance, #7 hands back the exact sedimented object,
+    and writes are born at their emission tick."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.dry = DryRun()
+        cls.dry.run(32)
+        cls.events = cls.dry.emissions
+
+    def test_every_emission_is_an_envelope_with_ordered_provenance(self) -> None:
+        for tick, fid, envelope in self.events:
+            self.assertIs(
+                type(envelope), Envelope, msg=f"tick {tick} flow #{fid}"
+            )
+            self.assertIs(
+                type(envelope.provenance),
+                Provenance,
+                msg=f"tick {tick} flow #{fid}",
+            )
+            self.assertIn(fid, {f.fid for f in FLOW_LEDGER})
+            self.assertLessEqual(
+                envelope.provenance.tick_born, tick, msg=f"#{fid}"
+            )
+
+    def test_d4_read_body_is_the_exact_sedimented_object(self) -> None:
+        by_fid: dict[int, dict[int, Envelope]] = {}
+        for tick, fid, envelope in self.events:
+            by_fid.setdefault(fid, {})[tick] = envelope
+        for tick in range(2, 33):
+            read = by_fid[7][tick]
+            prior = by_fid[22][tick - 1]
+            self.assertIs(read.body, prior.body, msg=f"tick {tick}")
+            self.assertIs(read.body, self.dry.board.d4[tick - 2])
+            self.assertEqual(read.provenance, prior.provenance)
+            self.assertLess(read.provenance.tick_born, tick)
+
+    def test_reads_inherit_the_producing_write_provenance(self) -> None:
+        writes = {
+            (envelope.provenance.source_fid, envelope.provenance.tick_born):
+                envelope
+            for _tick, fid, envelope in self.events
+            if fid in D2_WRITES
+        }
+        for tick, fid, envelope in self.events:
+            if fid not in (8, 25) or envelope.body is None:
+                continue
+            provenance = envelope.provenance
+            self.assertLess(provenance.tick_born, tick, msg=f"#{fid}")
+            if provenance == Provenance(23, 0):
+                continue  # the MAT_SEED record predates every write
+            writer = writes[(provenance.source_fid, provenance.tick_born)]
+            self.assertEqual(
+                writer.body.overlay_id,
+                envelope.body.overlay_id,
+                msg=f"tick {tick} flow #{fid}",
+            )
+
+
+
+# ---------------------------------------------------------------------------
+# Phase 4-5b: typed physics bodies, D3 pool, D2 patch accounting
+# ---------------------------------------------------------------------------
+def _digest_body(debris_id: str = "debris-001", count: int = 3) -> DigestedDebrisBody:
+    return DigestedDebrisBody(
+        debris_id=debris_id,
+        centroid=(0.5,) * 64,
+        count=count,
+        spread=1.0,
+        first_tick=1,
+        last_tick=2,
+        peak_surprise=0.5,
+    )
+
+
+class TestPhysicsBodies(unittest.TestCase):
+    def test_bodies_are_frozen_and_hashable(self) -> None:
+        bodies = [
+            FrameBody(b"\x00" * 3, 1, 1, 0),
+            PredictionErrorBody(0.5, (0.0,) * 64),
+            LatentRolloutBody(((0.0,) * 64,) * 4),
+            StateDeltaBody((0.0,) * 64, 0.5),
+            CollapseMandateBody("ceiling-pressure", 8, 8, 7, "debris-001", 3),
+            EmergentCrystalBody((0.0,) * 64, 0.5, 3),
+            _digest_body(),
+            StructuralMotifBody("motif-001", "debris-001", (0.0,) * 64, 4, 1.0, 4, 0.0, 1, 4),
+        ]
+        for body in bodies:
+            self.assertEqual(hash(body), hash(body))
+            self.assertIn(type(body), PAYLOAD_SCHEMA[_fid_for_body(body)])
+
+    def test_body_validation(self) -> None:
+        with self.assertRaises(ValueError):
+            FrameBody(b"\x00" * 5, 1, 1, 0)  # length != h*w*3
+        with self.assertRaises(ValueError):
+            PredictionErrorBody(float("nan"), (0.0,) * 64)
+        with self.assertRaises(ValueError):
+            PredictionErrorBody(0.5, (0.0,) * 3)  # wrong latent width
+        with self.assertRaises(ValueError):
+            MatOverlay(0, "x", "frozen")
+        with self.assertRaises(ValueError):
+            _digest_body().__class__("id", (0.0,) * 3, 1, 0.0, 0, 0, 0.0)
+
+    def test_no_op_sentinels_are_real_exact_type_bodies(self) -> None:
+        self.assertEqual(noop_overlay().overlay_id, NOOP_OVERLAY_ID)
+        self.assertEqual(noop_debris().debris_id, NO_DEBRIS_ID)
+        self.assertEqual(noop_debris().count, 0)
+        self.assertEqual(noop_motif().persistence, 0)
+        self.assertEqual(noop_mandate().pressure, 0)
+        self.assertIn(type(noop_debris()), PAYLOAD_SCHEMA[19])
+        self.assertIn(type(noop_motif()), PAYLOAD_SCHEMA[21])
+        self.assertIn(type(noop_mandate()), PAYLOAD_SCHEMA[17])
+        self.assertIn(type(noop_overlay()), PAYLOAD_SCHEMA[23])
+
+
+def _fid_for_body(body: object) -> int:
+    for fid, body_type in REAL_BODIES.items():
+        if type(body) is body_type:
+            return fid
+    if type(body) is MatOverlay:
+        return 23
+    raise AssertionError(f"{type(body).__name__} has no flow")
+
+
+class TestDebrisPool(unittest.TestCase):
+    def test_capacity_and_provenance(self) -> None:
+        pool = DebrisPool(capacity=2, max_bytes=DEBRIS_MAX_BYTES)
+        provenance = (19, 1)
+        pool.deposit(_digest_body("a"), provenance, 1)
+        pool.deposit(_digest_body("b"), provenance, 2)
+        self.assertEqual(len(pool), 2)
+        self.assertLessEqual(pool.byte_size(), DEBRIS_MAX_BYTES)
+        evicted = pool.deposit(_digest_body("c"), provenance, 3)
+        self.assertEqual(len(evicted), 1)
+        self.assertEqual(evicted[0].body.debris_id, "a")
+        self.assertEqual(pool.newest().body.debris_id, "c")
+        self.assertEqual(pool.newest().provenance, provenance)
+
+    def test_byte_ceiling_evicts(self) -> None:
+        one = len(_digest_body("a").debris_id) + 64 * 8 + 8 * 5
+        pool = DebrisPool(capacity=8, max_bytes=one + 8)  # room for one body only
+        pool.deposit(_digest_body("a"), (19, 1), 1)
+        evicted = pool.deposit(_digest_body("b"), (19, 2), 2)
+        self.assertEqual(len(evicted), 1)
+        self.assertEqual(evicted[0].body.debris_id, "a")
+        self.assertLessEqual(pool.byte_size(), pool.max_bytes)
+
+    def test_no_op_is_never_deposited(self) -> None:
+        pool = DebrisPool()
+        with self.assertRaises(ValueError):
+            pool.deposit(noop_debris(), (19, 1), 1)
+        self.assertEqual(len(pool), 0)
+
+    def test_default_bounds(self) -> None:
+        self.assertEqual(DebrisPool().capacity, DEBRIS_CAPACITY)
+        self.assertEqual(DebrisPool().max_bytes, DEBRIS_MAX_BYTES)
+
+
+class _Patch:
+    def __init__(self, overlay_id: str, nbytes: int, param_count: int = 12) -> None:
+        self.overlay_id = overlay_id
+        self.nbytes = nbytes
+        self.param_count = param_count
+
+
+class TestMatBoardPatches(unittest.TestCase):
+    def test_attach_and_account(self) -> None:
+        board = MatBoard(seed=False)
+        board.birth(MatOverlay(1, "ovr-1", "active"))
+        board.attach_patch("ovr-1", _Patch("ovr-1", 1000))
+        self.assertEqual(board.patch_bytes(), 1000)
+        self.assertEqual(board.patch_params(), 12)
+        self.assertIsNotNone(board.patch("ovr-1"))
+        board.assert_patch_bounds(require_complete=True)
+        self.assertIn("ovr-1", {oid for oid, _ in board.residents()})
+
+    def test_per_patch_ceiling_rejects_full_patch(self) -> None:
+        board = MatBoard(seed=False)
+        board.birth(MatOverlay(1, "ovr-full", "active"))
+        with self.assertRaises(ValueError):
+            board.attach_patch("ovr-full", _Patch("ovr-full", 843_680))
+        self.assertEqual(board.patch_bytes(), 0)
+        self.assertGreater(MAX_PATCH_BYTES, 136_960)
+        self.assertLess(MAX_PATCH_BYTES, 843_680)
+
+    def test_attach_requires_a_resident(self) -> None:
+        board = MatBoard(seed=False)
+        with self.assertRaises(AssertionError):
+            board.attach_patch("ghost", _Patch("ghost", 10))
+
+    def test_table_ceiling_evicts_record_and_patch_atomically(self) -> None:
+        board = MatBoard(seed=False, max_patch_bytes=1500, max_patch_total_bytes=1500)
+        board.birth(MatOverlay(1, "ovr-1", "active"))
+        board.attach_patch("ovr-1", _Patch("ovr-1", 1000))
+        board.birth(MatOverlay(2, "ovr-2", "active"))
+        board.attach_patch("ovr-2", _Patch("ovr-2", 1000))
+        board.enforce_patch_ceiling(3)
+        self.assertEqual(board.resident_ids(), frozenset({"ovr-2"}))
+        self.assertEqual(tuple(oid for oid, _p in board.patches()), ("ovr-2",))
+        self.assertIn(("ovr-1", 1, 3), board.byte_evictions)
+        board.assert_patch_bounds(require_complete=True)
+
+    def test_capacity_eviction_removes_the_patch(self) -> None:
+        board = MatBoard(seed=False)
+        for index in range(MAT_CAPACITY + 1):
+            board.birth(MatOverlay(index + 1, f"ovr-{index}", "active"))
+            board.attach_patch(f"ovr-{index}", _Patch(f"ovr-{index}", 10))
+        board.evict_if_needed(9)
+        self.assertEqual(len(board.residents()), MAT_CAPACITY)
+        self.assertEqual(len(board.patches()), MAT_CAPACITY)
+        self.assertNotIn("ovr-0", board.resident_ids())
+        self.assertIsNone(board.patch("ovr-0"))
+        board.assert_patch_bounds(require_complete=True)
+
+    def test_completeness_assert_catches_unpatched_record(self) -> None:
+        board = MatBoard(seed=False)
+        board.birth(MatOverlay(1, "ovr-1", "active"))
+        with self.assertRaises(AssertionError):
+            board.assert_patch_bounds(require_complete=True)
+
+    def test_evict_record_is_atomic(self) -> None:
+        board = MatBoard(seed=False)
+        board.birth(MatOverlay(1, "ovr-1", "active"))
+        board.attach_patch("ovr-1", _Patch("ovr-1", 10))
+        board.evict_record("ovr-1", 5)
+        self.assertEqual(board.resident_ids(), frozenset())
+        self.assertEqual(board.patches(), ())
+        self.assertIn(("ovr-1", 1, 5), board.evictions)
+
+    def test_total_ceiling_constant(self) -> None:
+        self.assertEqual(MAX_PATCH_TOTAL_BYTES, 4 * MAX_PATCH_BYTES)
+
+
+class TestMatBoardGuardRails(unittest.TestCase):
+    """D: guard rails must fail without mutating the record/patch table."""
+
+    def test_ghost_revalidation_leaves_state_intact(self) -> None:
+        board = MatBoard(seed=False)
+        board.birth(MatOverlay(1, "ovr-a", "active"))
+        board.attach_patch("ovr-a", _Patch("ovr-a", 10))
+        with self.assertRaises(RuntimeError):
+            board.revalidate(MatOverlay(2, "ghost", "active"))
+        self.assertEqual(board.residents(), (("ovr-a", 1),))
+        self.assertEqual(tuple(oid for oid, _p in board.patches()), ("ovr-a",))
+        self.assertEqual(board.patch_bytes(), 10)
+
+    def test_revalidation_on_empty_board_raises_and_stays_empty(self) -> None:
+        board = MatBoard(seed=False)
+        with self.assertRaises(RuntimeError):
+            board.revalidate(MatOverlay(1, "ovr-a", "active"))
+        self.assertEqual(board.residents(), ())
+        self.assertEqual(board.patches(), ())
+
+    def test_duplicate_birth_is_rejected(self) -> None:
+        board = MatBoard(seed=False)
+        board.birth(MatOverlay(1, "ovr-a", "active"))
+        with self.assertRaises(ValueError):
+            board.birth(MatOverlay(2, "ovr-a", "active"))
+        self.assertEqual(board.residents(), (("ovr-a", 1),))
+        board.assert_patch_bounds()
+
+    def test_evict_record_removes_exactly_one_record_and_patch(self) -> None:
+        board = MatBoard(seed=False)
+        for index in (1, 2):
+            board.birth(MatOverlay(index, f"ovr-{index}", "active"))
+            board.attach_patch(f"ovr-{index}", _Patch(f"ovr-{index}", 10))
+        self.assertIsNone(board.evict_record("missing", 3))
+        self.assertEqual(len(board.residents()), 2)
+        board.evict_record("ovr-1", 4)
+        self.assertEqual(tuple(oid for oid, _e in board.residents()), ("ovr-2",))
+        self.assertEqual(tuple(oid for oid, _p in board.patches()), ("ovr-2",))
+        self.assertEqual(board.patch_bytes(), 10)
+        self.assertEqual(board.evictions, [("ovr-1", 1, 4)])
+        board.assert_patch_bounds(require_complete=True)
 
 
 if __name__ == "__main__":

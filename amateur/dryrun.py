@@ -10,6 +10,20 @@ injected every tick; read-consumes expect data (a deficit charge), store
 absorbs are best-effort; the two in-tick cycles (#10 Resolved Trajectory,
 #17 Collapse Mandate) are one-tick-delayed mailboxes.
 
+Provenance (A2, user-adjudicated): every accepted payload is an
+`Envelope(Provenance(source_fid, tick_born), body)` (see
+`amateur/provenance.py`). `PAYLOAD_SCHEMA` remains the exact-type *body*
+whitelist; the envelope is the transport gate at the channel boundary.
+`_derive()` runs once at the start of every tick and fills
+`self.derived` for all 26 fids from live node/store state; `_arrive()`
+only reads that map, applies `require_channel_provenance`, and transports
+the envelope. `_payload_for` (the old emit-time minter) is gone. Store
+reads inherit the provenance of the stored record (D2 head, D4 sediment);
+writes are born at their emission tick; `MAT_SEED` is `(23, 0)`. The
+derivation pass does not make the synthetic bodies honest: #22's rotating
+confidence and #23's `cry-{tick}` remain synthetic (gate recorded
+PARTIAL) until physics derives them from #21/#25.
+
 Channel semantics (user-adjudicated): reject-with-charge at capacity-1
 mailboxes. An arrival into an empty box is accepted; an arrival onto a
 non-empty box is refused: the event object is discarded at the channel
@@ -40,19 +54,25 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from dataclasses import dataclass
-from typing import Mapping, NamedTuple
+from typing import Mapping, NamedTuple, Protocol
 
 from .events import FlowEvent, carrier_for
 from .ledger import E1, E2, FLOW_LEDGER, STORES
 from .payloads import (
+    MAT_SEED,
+    NON_READ_FLOWS,
+    NO_DEBRIS_ID,
+    NOOP_OVERLAY_ID,
     BiasPrimitive,
-    D2_FLOWS,
-    D2_WRITES,
-    D4_FLOWS,
-    D4_WRITES,
+    DebrisPool,
+    DigestedDebrisBody,
     MatBoard,
     MatOverlay,
-    require_payload,
+)
+from .provenance import (
+    Envelope,
+    Provenance,
+    require_channel_provenance,
 )
 
 
@@ -88,6 +108,15 @@ def _write_fids() -> tuple[int, ...]:
 
 
 WRITE_FLOWS: tuple[int, ...] = _write_fids()
+
+#: Non-read flows that stay placeholders this round (Lead decision f).
+#: ``NON_READ_FLOWS`` is derived from the ledger; the executor never asks
+#: the payload source for these, and the source's coverage ledger marks
+#: them ``placeholder``.  Fixed dispatch, not a branch on the ledger.
+PLACEHOLDER_FLOWS: frozenset[int] = frozenset({1, 2, 4, 5, 9, 13, 16})
+
+#: Non-read flows the payload source must supply (content-only hook, Q2).
+SOURCE_FLOWS: frozenset[int] = NON_READ_FLOWS - PLACEHOLDER_FLOWS
 
 
 def flow_ops() -> dict[int, tuple[str, ...]]:
@@ -177,32 +206,6 @@ def prefix_depth(fid: int, box: int, n: int) -> int:
 _BIAS_STEPS = (0.4, 0.6, 0.8)
 
 
-def _payload_for(fid: int, tick: int, board: MatBoard) -> object:
-    """Synthetic payload for the typed geometry channels.
-
-    D2: the stale read (#25) delivers the board head; the ratchet's
-    revalidation (#24) and surviving-crystal birth (#23) carry the current
-    epoch. D4: the base-ops read (#7) delivers the latest bias; the
-    sedimentation (#22) mints a rotating confidence primitive. Sparse
-    reads may be None when the store has not yet filled.
-    """
-    if fid in D2_WRITES:
-        stale_id, _ = board.head()
-        if fid == 24:
-            return MatOverlay(tick, stale_id, "active")
-        return MatOverlay(tick, f"cry-{tick}", "active")
-    if fid in D2_FLOWS:
-        overlay_id, epoch = board.head()
-        return MatOverlay(epoch, overlay_id, "stale")
-    if fid in D4_WRITES:
-        slot = (tick - 1) % 3
-        return BiasPrimitive(f"bias-{slot}", _BIAS_STEPS[slot])
-    if fid in D4_FLOWS:
-        latest = board.latest_bias()
-        return latest
-    return None
-
-
 @dataclass(frozen=True)
 class TickStat:
     attempted: dict[int, int]
@@ -225,15 +228,104 @@ class Report:
     history: tuple[TickStat, ...]
 
 
+
+class PayloadSource(Protocol):
+    """Content-only payload source hook (Q2, adjudicated A).
+
+    The source supplies *bodies* for the non-read flows.  It cannot
+    construct envelopes, choose provenance, influence the schedule/stage
+    order/channel semantics, or write back into the executor.  Store reads
+    stay executor-derived.  A failure is an assertion in the derivation
+    pass, never a channel charge.
+
+    ``coverage`` is a plain data ledger (``fid -> derived | synthetic |
+    placeholder``) read by tests only; no behaviour branches on it.  For a
+    physics source, ``derive_body`` asserts for any fid it is asked for
+    that is not in its derived dispatch.
+    """
+
+    mode: str
+    coverage: Mapping[int, str]
+
+    def derive_body(
+        self, fid: int, tick: int, *, board: MatBoard, debris: DebrisPool
+    ) -> object: ...
+
+    def on_commit(
+        self,
+        fid: int,
+        envelope: Envelope,
+        *,
+        board: MatBoard,
+        debris: DebrisPool,
+    ) -> None: ...
+
+
+class SyntheticSource:
+    """The explicit plumbing sentinel: synthetic bodies, no physics.
+
+    Reachable only by explicit construction; ``DryRun()`` defaults to it so
+    the plumbing tests keep their historical synthetic behaviour.  Every
+    non-read flow is covered as ``synthetic`` in the coverage ledger.
+    ``PhysicsRun`` never uses this class.
+    """
+
+    mode = "synthetic"
+
+    def __init__(self) -> None:
+        self.coverage: dict[int, str] = {
+            fid: "synthetic" for fid in sorted(NON_READ_FLOWS)
+        }
+
+    def derive_body(
+        self, fid: int, tick: int, *, board: MatBoard, debris: DebrisPool
+    ) -> object:
+        if fid == 22:
+            slot = (tick - 1) % 3
+            return BiasPrimitive(f"bias-{slot}", _BIAS_STEPS[slot])
+        if fid == 23:
+            return MatOverlay(tick, f"cry-{tick}", "active")
+        if fid == 24:
+            head_id = board.head()[0]
+            return MatOverlay(tick, head_id, "active")
+        return None
+
+    def on_commit(
+        self,
+        fid: int,
+        envelope: Envelope,
+        *,
+        board: MatBoard,
+        debris: DebrisPool,
+    ) -> None:
+        return None
+
+
 class DryRun:
     """Mailbox-based executor of the ledger spine, plumbing only."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        source: PayloadSource | None = None,
+        *,
+        seed_board: bool = True,
+    ) -> None:
+        self.source: PayloadSource = (
+            SyntheticSource() if source is None else source
+        )
         self.mailboxes: dict[int, deque[FlowEvent]] = {
             f.fid: deque() for f in FLOW_LEDGER
         }
-        self.board = MatBoard()
-        self.emissions: list[tuple[int, int, object]] = []
+        self.board = MatBoard(seed=seed_board)
+        self.debris = DebrisPool()
+        self.derived: dict[int, Envelope] = {}
+        self.emissions: list[tuple[int, int, Envelope]] = []
+        self._head_provenance: dict[str, Provenance] = (
+            {MAT_SEED[0]: Provenance(23, 0)} if seed_board else {}
+        )
+        self._d4_provenance: list[Provenance] = []
+        #: Confidence-0 #22 writes absorbed as consumed no-ops (Q4).
+        self.zero_confidence_absorbed: Counter[int] = Counter()
         self._tick_no = 0
         self.attempted: Counter[int] = Counter()
         self.accepted: Counter[int] = Counter()
@@ -243,25 +335,112 @@ class DryRun:
         self.sunk: Counter[int] = Counter()
         self.max_depth: Counter[int] = Counter()
 
+    @property
+    def tick_no(self) -> int:
+        """The current tick index (0 before the first ``tick``)."""
+        return self._tick_no
+
     def _touch(self, fid: int) -> None:
         depth = len(self.mailboxes[fid])
         if depth > self.max_depth[fid]:
             self.max_depth[fid] = depth
 
+    def _derive(self) -> None:
+        """Derivation pass: fill every flow's envelope from live state.
+
+        Runs once at the start of the tick, after the clock advances and
+        before any arrival. Bodies and provenance are built here, never in
+        `_arrive`: store reads inherit the stored record's provenance, every
+        non-read flow is born at this tick. The channel gate is deliberately
+        not applied here; `_arrive` validates against the receiving channel.
+
+        Source hook (Q2, adjudicated A): the executor keeps the store reads
+        (#7 D4, #8/#25 D2, and the unimplemented D1/D3 reads) and delegates
+        the non-read flows to `self.source.derive_body`.  A fixed
+        ``PLACEHOLDER_FLOWS`` set is emitted as ``None`` by the executor and
+        never asked of the source; that dispatch is the executor's contract,
+        not a branch on the source's coverage ledger.  A source that cannot
+        derive a body it is asked for raises in this pass, before any
+        arrival, so the failure is an assertion and never a channel charge.
+
+        Physics bodies are real values; the fixed cadence is preserved by
+        exact-type no-op sentinels for the trigger-gated flows (#17, #19,
+        #21, #23, #24) and the Q4 zero-confidence #22 gate body.
+        """
+        tick = self._tick_no
+        envelopes: dict[int, Envelope] = {}
+
+        def put(fid: int, body: object, provenance: Provenance) -> None:
+            envelopes[fid] = Envelope(provenance, body)
+
+        # D2 head reads (#8, #25) inherit the head record's provenance.
+        # A physics-mode board may be empty between evictions; a read with
+        # no resident is an empty body with self-origin provenance.
+        residents = self.board.residents()
+        if residents:
+            head_id, epoch = residents[0]
+            try:
+                head_provenance = self._head_provenance[head_id]
+            except KeyError:
+                raise RuntimeError(
+                    f"no stored provenance for D2 head {head_id!r}"
+                ) from None
+            put(8, MatOverlay(epoch, head_id, "stale"), head_provenance)
+            put(25, MatOverlay(epoch, head_id, "stale"), head_provenance)
+        else:
+            put(8, None, Provenance(8, tick))
+            put(25, None, Provenance(25, tick))
+
+        # D4 read (#7) hands back the exact stored object, provenance and
+        # all.  The D4 core is empty until a real sediment passes the gate.
+        latest = self.board.latest_bias()
+        if latest is None:
+            put(7, None, Provenance(7, tick))
+        else:
+            put(7, latest, self._d4_provenance[-1])
+
+        # Unimplemented D1/D3 reads: empty body, self-origin provenance.
+        for fid in (11, 14, 15, 20, 26):
+            put(fid, None, Provenance(fid, tick))
+
+        # Non-read flows: fixed executor dispatch.  Placeholders are never
+        # asked of the source; every other flow is a content-only source
+        # derivation born at this tick.
+        for fid in sorted(NON_READ_FLOWS):
+            if fid in PLACEHOLDER_FLOWS:
+                body: object = None
+            else:
+                body = self.source.derive_body(
+                    fid, tick, board=self.board, debris=self.debris
+                )
+            put(fid, body, Provenance(fid, tick))
+
+        self.derived = envelopes
+
+    def _prune_head_provenance(self) -> None:
+        """Drop provenance for overlays evicted from the mat."""
+        resident_ids = {oid for oid, _epoch in self.board.residents()}
+        for oid in [oid for oid in self._head_provenance
+                    if oid not in resident_ids]:
+            del self._head_provenance[oid]
+
     def _arrive(self, fid: int, *, copies: int = 1) -> None:
-        """Reject-with-charge arrival at a capacity-1 channel (adjudicated).
+        """Transport the derived envelope to a capacity-1 channel.
 
         First arrival in stage order wins; ledger order is the tie-break
-        (callers proceed in ascending fid within their phase). A refused
-        copy is discarded here -- the event object never materializes, no
-        payload is minted -- and leaves a scalar excess charge, distinct
-        from the miss (deficit) charge and never summed with it. O(1)
-        per copy, exactly like a sink.
+        (callers proceed in ascending fid within their phase). The body and
+        its provenance were built by `_derive` -- this method constructs
+        neither. A refused copy is discarded here (the same envelope object
+        never enters a second box) and leaves a scalar excess charge,
+        distinct from the miss (deficit) charge and never summed with it.
+        O(1) per copy, exactly like a sink.
         """
         if copies < 1:
             raise ValueError(
                 "starvation (k = 0) is deferred to the physics epoch"
             )
+        envelope = self.derived[fid]
+        require_channel_provenance(fid, envelope, self._tick_no)
         carrier = carrier_for(fid)
         for _ in range(copies):
             box = self.mailboxes[fid]
@@ -269,10 +448,8 @@ class DryRun:
             if box:
                 self.refused[fid] += 1
                 continue
-            payload = _payload_for(fid, self._tick_no, self.board)
-            require_payload(fid, payload)
-            box.append(carrier(payload=payload))
-            self.emissions.append((self._tick_no, fid, payload))
+            box.append(carrier(payload=envelope))
+            self.emissions.append((self._tick_no, fid, envelope))
             self.accepted[fid] += 1
             self._touch(fid)
 
@@ -286,23 +463,99 @@ class DryRun:
             self.missed[fid] += 1
 
     def _absorb_writes(self) -> None:
+        """Absorb committed writes; notify the source one-way, post-commit.
+
+        Store effects: #19 deposits a real D3 body (the fixed-cadence no-op
+        body is not deposited), #23 births / #24 revalidates a D2 record,
+        and a confidence-0 #22 is a **consumed no-op** (Q4): the event is
+        drained with the other write mailboxes, but no D4 state changes, so
+        the identity ``B: 1 = 1 + 0 + 0`` holds on the absorbed path rather
+        than by skipping the event.
+
+        Patch attach (Q1-A) happens inside the source's one-way
+        ``on_commit`` notification, after the record commit and before the
+        capacity/byte evictions; eviction removes the record and its patch
+        together.  A `require_complete` patch-bounds assertion runs in
+        physics mode so a resident record without a patch fails loudly.
+        """
         for fid in WRITE_FLOWS:
             self._consume(fid, silent=True)
-        payloads = {
-            fid: payload
-            for tick, fid, payload in self.emissions
+        envelopes = {
+            fid: envelope
+            for tick, fid, envelope in self.emissions
             if tick == self._tick_no
         }
-        overlay = payloads.get(23)
-        if isinstance(overlay, MatOverlay):
-            self.board.birth(overlay)
-        overlay = payloads.get(24)
-        if isinstance(overlay, MatOverlay):
-            self.board.revalidate(overlay)
+
+        # D3: deposit the real #19 body; the no-op sentinel is not stored.
+        deposit = envelopes.get(19)
+        if (
+            deposit is not None
+            and type(deposit.body) is DigestedDebrisBody
+            and deposit.body.debris_id != NO_DEBRIS_ID
+        ):
+            self.debris.deposit(deposit.body, deposit.provenance, self._tick_no)
+
+        # D2 record commits (#23 birth, #24 revalidation).  The fixed-cadence
+        # no-op token leaves the store untouched.
+        overlay = envelopes.get(23)
+        if (
+            overlay is not None
+            and type(overlay.body) is MatOverlay
+            and overlay.body.overlay_id != NOOP_OVERLAY_ID
+        ):
+            self.board.birth(overlay.body)
+            self._head_provenance[overlay.body.overlay_id] = overlay.provenance
+        overlay = envelopes.get(24)
+        if (
+            overlay is not None
+            and type(overlay.body) is MatOverlay
+            and overlay.body.overlay_id != NOOP_OVERLAY_ID
+        ):
+            self.board.revalidate(overlay.body)
+            self._head_provenance[overlay.body.overlay_id] = overlay.provenance
+
+        # One-way post-commit notification: the source attaches the patch
+        # for the committed records (Q1-A).
+        for fid in (23, 24):
+            envelope = envelopes.get(fid)
+            if (
+                envelope is not None
+                and type(envelope.body) is MatOverlay
+                and envelope.body.overlay_id != NOOP_OVERLAY_ID
+            ):
+                self.source.on_commit(
+                    fid, envelope, board=self.board, debris=self.debris
+                )
+
         self.board.evict_if_needed(self._tick_no)
-        bias = payloads.get(22)
-        if isinstance(bias, BiasPrimitive):
-            self.board.sediment(bias)
+        self.board.enforce_patch_ceiling(self._tick_no)
+        self._prune_head_provenance()
+
+        # D4 sediment: confidence > 0 only.  A confidence-0 sentinel is the
+        # real ratchet gate's derived output and is absorbed as a no-op.
+        bias = envelopes.get(22)
+        if bias is not None and type(bias.body) is BiasPrimitive:
+            if bias.body.confidence > 0.0:
+                self.board.sediment(bias.body)
+                self._d4_provenance.append(bias.provenance)
+                assert len(self._d4_provenance) == len(self.board.d4), (
+                    "D4 provenance list out of step with board.d4"
+                )
+            else:
+                self.zero_confidence_absorbed[22] += 1
+
+        # Post-commit notifications for the remaining writes, after the
+        # evictions, so a physics source can prune non-resident overlays and
+        # the executor can align the store with the organ in the same tick.
+        for fid in (19, 22):
+            envelope = envelopes.get(fid)
+            if envelope is not None:
+                self.source.on_commit(
+                    fid, envelope, board=self.board, debris=self.debris
+                )
+        self.board.assert_patch_bounds(
+            require_complete=(self.source.mode == "physics")
+        )
 
     def _drain_sinks(self) -> None:
         for fid in SINK_FLOWS:
@@ -311,15 +564,18 @@ class DryRun:
             box.clear()
 
     def tick(self, injections: Mapping[int, int] | None = None) -> None:
-        """One tick: injections (with adversarial multiplicity), spine,
-        write absorption, sink drain.
+        """One tick: derivation pass, injections (with adversarial
+        multiplicity), spine, write absorption, sink drain.
 
+        `_derive()` runs first, after the clock advances and before any
+        arrival: every flow's envelope is built from live state once.
         `injections[fid] = k` overrides that flow's canonical single
         arrival with k arrival attempts (k >= 1; starvation k = 0 is
         deferred to the physics epoch). All arrivals proceed in ledger
         fid order; later arrivals onto a full box are refused.
         """
         self._tick_no += 1
+        self._derive()
         boosts = dict(injections or {})
         unknown = sorted(set(boosts) - set(self.mailboxes))
         if unknown:

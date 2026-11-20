@@ -52,6 +52,28 @@ rejected). Flow ids derive from the ledger itself: `D2_FLOWS = {8, 23, 24,
 25}`, `D4_FLOWS = {7, 22}`, with ratchet-owned writes `D2_WRITES = {23, 24}`
 and `D4_WRITES = {22}`.
 
+**Provenance envelope (round 8, ADJUDICATED — option A2).** Every accepted
+traversal carries `Envelope(Provenance(source_fid, tick_born), body)`
+(`amateur/provenance.py`). The payload schema above is *not* reopened: it
+stays the exact-type **body** whitelist, and the envelope is the transport
+gate beside it, so `Sneaky(MatOverlay)` and a subclassed envelope are both
+rejected. `source_fid` names the producing **flow** (a write names its
+emitting edge; a read names the historical write that bore the stored
+record; an exogenous input names #1/#3). `tick_born` is the tick the value
+came into existence (0 = the `MAT_SEED` overlay). The per-channel rule is:
+a store read with a non-`None` body must have `tick_born < emit_tick`
+(reads precede the same tick's writes in stage order); every other
+traversal requires `tick_born == emit_tick`. Bodies and provenance are
+built by `DryRun._derive()` at the start of each tick from live node/store
+state; `_arrive` only transports (the old `_payload_for` minter is gone).
+`emissions` therefore carries envelopes. The full per-flow coverage table
+is below. The honest status is two-tier: carrying and ordering are closed;
+the physics source now derives real bodies for the flows it owns (Q4: #22
+is the ratchet gate's output, #23/#24 are the organ's records), but the
+default `DryRun` keeps `SyntheticSource` and the derivation half remains
+**partial** overall — #2/#4/#5/#9/#13/#16 and all D1/D3 reads are still
+placeholders, and P5 does not consume #15/#16/#20.
+
 The mat lifecycle is one closed policy — mirrored byte-for-byte by the Lean
 `matTick`/`matRun` recursion and by the executor's `MatBoard`: seed one
 overlay (`"ovr-0"`, epoch 0); each tick *t* append a birth (#23, epoch *t*),
@@ -63,7 +85,81 @@ is *t* or *t−1* — nothing ossifies), `mat_bounded` (≤ 4 residents).
 
 `test_payloads.py` covers the schema, the subclass/trajectory rejection, the
 lifecycle, and 200-tick executor integration (no trajectory ever reaches D4;
-#25→#24 same-tick pairing on `overlay_id`).
+#25→#24 same-tick pairing on `overlay_id`). `test_provenance.py` covers the
+carrier, the exact-type interaction, the per-channel birth rule, executor
+read continuity (#7 identity, #8/#25 inherited provenance, seed `(23, 0)`),
+and the structural anti-mint evidence (explicitly labelled evidence, not a
+proof of derivation).
+
+### Provenance coverage by flow (round 8, measured)
+
+`synthetic` = no body (`None` placeholder) or a body with no state
+dependency; `derived` = the body is the stored record or a function of live
+node/store state at emission. The `source_fid` column is the producing-flow
+attribution carried in the envelope.
+
+| # | Flow | Body this epoch | Coverage | `source_fid` |
+| --- | --- | --- | --- | --- |
+| 1 | Gradients (E2→P1) | `None` | synthetic | 1 |
+| 2 | Crystallized Output (P1→E2) | `None` | synthetic | 2 |
+| 3 | Perturbations (E1→P1) | `None` | synthetic | 3 |
+| 4 | Active Probes (P1→E1) | `None` | synthetic | 4 |
+| 5 | Entropy Exhaust (P1→E1) | `None` | synthetic | 5 |
+| 6 | Prediction Error (P1→P2) | `None` | synthetic | 6 |
+| 7 | Base Ops (D4→P2) | stored `BiasPrimitive` | **derived** | 22 |
+| 8 | Mat Overlays (D2→P2) | stored `MatOverlay` | **derived** | 23/24 |
+| 9 | Routed Dynamics (P2→P3) | `None` | synthetic | 9 |
+| 10 | Resolved Trajectory (P3→P1) | `None` | synthetic | 10 |
+| 11 | Active Context (D1→P3) | `None` | synthetic | 11 |
+| 12 | State Deltas & Surprise (P3→P4) | `None` | synthetic | 12 |
+| 13 | Board Ops (P4→D1) | `None` | synthetic | 13 |
+| 14 | Slot State (D1→P4) | `None` | synthetic | 14 |
+| 15 | Evicted Clusters (D1→P5) | `None` | synthetic | 15 |
+| 16 | Cost vs. Error (P4→P5) | `None` | synthetic | 16 |
+| 17 | Collapse Mandate (P5→P4) | `None` | synthetic | 17 |
+| 18 | Emergent Crystals (P3→P5) | `None` | synthetic | 18 |
+| 19 | Digested Debris (P5→D3) | `None` | synthetic | 19 |
+| 20 | Consumed Scaffolds (D3→P5) | `None` | synthetic | 20 |
+| 21 | Structural Motifs (P5→P6) | `None` | synthetic | 21 |
+| 22 | Sedimented Invariants (P6→D4) | rotating `BiasPrimitive` | **synthetic** (minted content) | 22 |
+| 23 | Surviving Crystals (P6→D2) | `cry-{tick}` `MatOverlay` | **synthetic** (minted content) | 23 |
+| 24 | Ratcheted Overlays (P6→D2) | head identity + tick epoch | **derived** | 24 |
+| 25 | Stale Overlays (D2→P6) | stored `MatOverlay` | **derived** | 23/24 |
+| 26 | Avoidance Trails (D3→P2) | `None` | synthetic | 26 |
+
+Summary for the default **synthetic dry run** (`SyntheticSource`):
+**4/26 derived** (#7, #8, #24, #25); 22/26 synthetic (20 `None`
+placeholders + #22 + #23). All store reads with a non-`None` body are
+derived; D1/D3 reads stay synthetic because those stores are unimplemented
+in the dry run.
+
+Physics mode (`PhysicsRun` / `PhysicsSource`, Q1–Q4 = A) moves ten more
+flows to `derived`, so **11/26 derived** in physics mode:
+
+| # | Physics-mode body | Class |
+| --- | --- | --- |
+| 3 | perturbation frame | `FrameBody` |
+| 6 | surprise + 64-d residual | `PredictionErrorBody` |
+| 10 | 4-step latent rollout | `LatentRolloutBody` |
+| 12 | 64-d latent delta + surprise | `StateDeltaBody` |
+| 17 | digest collapse mandate | `CollapseMandateBody` |
+| 18 | emergent crystal residual | `EmergentCrystalBody` |
+| 19 | digested debris centroid | `DigestedDebrisBody` |
+| 21 | structural motif | `StructuralMotifBody` |
+| 22 | the real ratchet gate's output (confidence 0 in this slice) | `BiasPrimitive` |
+| 23/24 | organ birth / revalidation record | `MatOverlay` (unchanged) |
+
+Still placeholders in physics mode, by Lead decision: #1 (E2 gradient),
+#2 (crystallized output), #4/#5 (E1 exhaust), #9 (routed dynamics), #13
+(D1 write), #16 (P4 cost/error — P4 is unimplemented). D1 reads
+(#11/#14/#15) and D3 reads (#20/#26) remain placeholders: D1 is
+unimplemented and D3 is written but not read this round. The trigger-gated
+flows carry exact-type **no-op sentinels** on non-event ticks (`ovr-noop`,
+`debris-none`, `motif-none`, `none`), and #22 carries the Q4 confidence-0
+gate body; these are constants, not derived content, and are never
+retained in D2/D3/D4. The coverage ledger is plain test-only data — no
+executor behaviour branches on it. See
+[phase4-5-design.md](phase4-5-design.md) §14.
 
 ## Layer 2 — Pointwise recurrence, proved (`amateur/dryrun.py`, `formal/DryRun.lean`, `tools/gen_lean.py`, `test_lean_lockstep.py`)
 
@@ -156,6 +252,12 @@ How each user-supplied master invariant is currently verified:
 | INV-GEOMETRY | adjudicated two-tier reading: structural (writer sets) + proven (type-system purity) | `test_invariants.TestGeometry`; Lean `geometry_write_channel_purity`, `geometry_writes_anchored`; D2/D4 are the parametric geometry written only by 6.0, D1/D3 operational by design | enduring |
 | INV-NO-OSSIFY | typed + proven (schedule explicit) + empirical | Lean `mat_fresh_policy`/`mat_fresh`, `mat_bounded_policy`/`mat_bounded`; `test_payloads` lifecycle/integration | enduring (statement); current proof policy-relative to the mat law, hypothesis explicit |
 | INV-EMPTINESS | typed by construction + proven | `MatOverlay`/`BiasPrimitive` exact-type whitelist; Lean `geometry_write_channel_purity`; `test_payloads` trajectory-rejection | enduring |
+| INV-PROVENANCE (round 8) | carrying + ordering closed, structural anti-mint checked; derivation **partial** | A2 `Envelope(Provenance(source_fid, tick_born), body)`; `require_channel_provenance`; `test_provenance` (48 tests incl. executor continuity); `test_payloads.TestEmissionProvenance`; coverage table above | enduring (statement); #2/#4/#5/#9/#13/#16 stay placeholders and D3 is not read yet |
+| INV-PATCH (round 8) | Python-asserted, **tested-not-proven** (Lean bounds records only) | `MatBoard` patch table keyed `overlay_id` (Q1-A): record and patch evict atomically on the capacity, byte-ceiling and organ paths; `MAX_PATCH_BYTES=262,144` per patch, `MAX_PATCH_TOTAL_BYTES=1,048,576` per table; `test_payloads.TestMatBoardPatches`, `test_physics_run.TestPatchAccounting` | physics epoch; substance bound not proved, patch map is in-memory (persistence absent) |
+| INV-SOURCE (round 8) | structural + tested (no silent fallback) | content-only `PayloadSource` (Q2-A); fixed `PLACEHOLDER_FLOWS` dispatch that never reads the ledger; `PhysicsSource.derive_body` raises before any arrival; a source failure leaves every charge counter at 0; `test_physics_run.TestSourceSelection`/`TestCoverageLedger`/`TestSourceFailureIsNotACharge` | enduring (contract); physics producer partial |
+| INV-ATOMIC (round 8) | tested (fail-closed) | record+patch atomicity on every path: capacity, byte ceiling, organ-driven evict, and the fail-closed full-patch path (asserted in the derivation pass before any arrival, no state change); `MatBoard` guard rails (validate-before-pop revalidation, duplicate-birth rejection, exactly-one `evict_record`); `test_payloads.TestMatBoardGuardRails`/`TestMatBoardPatches`, `test_physics_run.TestFullPatchModeFailsClosed` | enduring (Python); Lean bounds records only |
+| INV-RESET (round 8) | tested | `PhysicsOrgan.reset_p6_state()` clears decisions/pending/cooldown/gate evidence/overlay table/fit history; `PhysicsRun.reset()` calls it; two consecutive `acceptance()` runs are identical (`1.261383`, stale 19, evict 23, clean end state); `test_physics_run.TestResetRepeatability` | enduring (harness contract); needed for the registered trace to be repeatable |
+| INV-ZERO-CONF (round 8) | tested by serialized-bytes equality + identity B | #22 is the **derived** gate output (Q4-A): it passes only when an overlay is active and cumulative adapted < base evidence exists, confidence `clamp(1-adapted/base,0,1)`; production publishes evidence after `stale_patience` (2) applied ticks, disclosed; `_absorb_writes` consumes a confidence-0 write as a no-op (no D4 mutation, `1 = 1 + 0 + 0`); `test_physics_run.TestZeroConfidenceGate` (blocked by measured harm, injected pass, non-vacuous 121 B retention, same object, 35 absorbed no-ops) | physics epoch; the passing branch is exercised by **injected** evidence only — no real adaptation was beneficial over the patience window in this slice |
 | INV-BLANKET | structural + layer-4 | `test_invariants.TestBlanket`, `test_design_intent`, `test_thermodynamics` | enduring |
 | INV-THROUGHPUT | covered | liveness + `test_every_entity_cycle_carries_throughput` | plumbing-only in current form (inherits LIVENESS's cadence); enduring form follows the spine-scoped liveness |
 | INV-CENSUS | resolved (raw membership, adjudicated) | `test_recurrence` census: \|Cycles(D1)\|=7 (entangled hub), \|Cycles(D2)\|=4, \|Cycles(D3)\|=4, \|Cycles(D4)\|=3 with zero 2-/3-hop loops — D4's structural insulation | enduring (pure topology) |
@@ -235,10 +337,50 @@ the implemented behavior.
 
 ## Physics-epoch acceptance gates (pinned now)
 
-- **Payload provenance (deferred by adjudication, gated here):** every
-  payload must carry `(source_fid, tick_born)` and be derived from actual
-  node state — no minting at emit time. The current synthetic contents
-  (`cry-{t}`, rotating confidences) are acceptable only in the dry run.
+- **Payload provenance (round 8, ADJUDICATED — A2 envelope; gate PARTIAL):**
+  every accepted payload carries `(source_fid, tick_born)` and is built by
+  the derivation pass, not at the emit boundary — no minting at emit time.
+  Carrying, ordering, and the structural anti-mint check are closed
+  (`test_provenance.py`, `test_payloads.TestEmissionProvenance`). In
+  physics mode the source derives real bodies for #3/#6/#10/#12/#17/#18/
+  #19/#21 and the organ's gate/records (#22/#23/#24), so the original
+  #22/#23 objection is closed; the gate stays **PARTIAL** because #2/#4/
+  #5/#9/#13/#16 are still placeholders, #15/#16/#20 are not consumed by
+  P5, and D3 is written but not read.
+- **Phase 4–5b executor wiring (round 8, ADJUDICATED Q1–Q4 = A; gate
+  PARTIAL):** the content-only source is separated from the executor
+  (reads stay executor-derived; `PLACEHOLDER_FLOWS` is a fixed executor
+  constant, never read from the coverage ledger); a missing derivation
+  raises before any arrival, so a source failure is never a channel charge;
+  D2 holds the predictor patch keyed by `overlay_id` with atomic
+  record+patch eviction and byte accounting
+  (`MAX_PATCH_BYTES`/`MAX_PATCH_TOTAL_BYTES`); the encoder is bit-identical
+  after fitting (`torch.equal`); #22 is the gate's **derived** output —
+  blocked here because the measured cumulative adapted/base evidence is
+  harmful (0.2657 vs 0.1475), with the pass condition, patience and
+  injected-evidence caveat recorded below; a confidence-0 #22 is a consumed
+  no-op and D4's retained contents are byte-identical: the acceptance run's
+  empty D4 stays empty (5 B, a vacuous guard), and the separate non-vacuous
+  retention probe seeds one real sediment through a passing gate and shows
+  121 B retained byte-identically across the full flip scenario (35 further
+  confidence-0 no-ops, same object, no second sediment). The supported
+  `patch="full"` mode fails **closed**: the 843,680 B patch is refused in
+  the derivation pass before any commit, with every charge counter unchanged
+  and no record, patch, or organ adapter left behind.
+  Open: the byte bound is Python-asserted (Lean bounds records only), the
+  patch map is in-memory, and the fixed cadence uses exact-type no-op
+  sentinels — cadence is **plumbing**, lifecycle semantics are
+  organ/store-owned until the trigger-gating round.
+- **Single-stream overlay recovery (round 8, MEASURED — FAILED, recorded):**
+  the pre-registered single-stream adaptation (last 16 same-stream
+  transitions, one attempt) does **not** produce a forward surprise drop:
+  adapted 0.3264 vs base 0.2588 over the 4 active ticks = **1.2614× (26 %
+  worse)**; the organ flags it stale after two harmful ticks and evicts it.
+  `test_physics_run.TestSingleStreamAcceptance.test_single_stream_surprise_drops`
+  is an explicit `expectedFailure` — the assertion is kept strict, not
+  weakened into "no material harm". The positive measured result remains
+  the bank/held-out fit (0.690× on unseen episodes,
+  `tests/test_physics_organ.py`), which is *not* the executor flow.
 - **Overflow semantics (round 7, ADJUDICATED — reject-with-charge):**
   each mailbox has capacity 1. Acceptance is first-arrival-wins with
   ledger order as tie-break — deterministic, stateless, pointwise. A
@@ -265,6 +407,45 @@ the implemented behavior.
   ultimately exits as entropy exhaust. Today the charges are pure
   accounting with no feedback into dynamics; this coupling is recorded
   now so that it is built, not rediscovered.
+
+## Round 8 physics-mode acceptance record (measured)
+
+Protocol: one executor stream (`PhysicsRun`, seed 7), 8 normal ticks,
+gravity flip, 20 post-flip ticks, flip back, 8 recovery ticks. The organ
+observes, digests and ratchets **before** `_derive`; the overlay is fitted
+once from the organ's same-stream buffer when a spike passes the q99 gate
+(last 16 transitions, one attempt, no post-hoc selection).
+
+| Item | Measured |
+| --- | --- |
+| normal-phase mean surprise | 0.1012 |
+| spike peak | 1.9496 (19.27× normal) |
+| pre-adoption flipped base mean | 0.4366 |
+| overlay installed | frame tick 16 (head patch 34,240 params / 136,960 B) |
+| active ticks | 4 |
+| adapted vs base, same ticks | 0.3264 vs 0.2588 → **1.2614×, no drop** |
+| stale / evict | finalized tick 19 / executor tick 23 |
+| end state | D2 residents and patches `()`, patch bytes 0 |
+| D4 (acceptance run) | empty before and after (5 B); 0 retained writes; 36 confidence-0 no-ops |
+| D4 retention (separate probe) | 1 pre-seeded real sediment, 121 B before and after, same object, 35 further no-ops |
+| #22 gate | derived from cumulative evidence, **blocked**: 0.2657 adapted vs 0.1475 base; 36 no-ops; D4 empty |
+| D3 | 7 bodies / 3,934 B of capacity 8 / 65,536 B |
+| encoder | bit-identical after the fit (`torch.equal`) |
+| suite / Lean | 289 tests, OK, 1 expected failure; `gen_lean` byte-identical |
+
+Honest reading: the no-drop is a **genuine null result**, not a wiring
+failure — the lifecycle fires end-to-end and four pre-registered/observed
+single-stream fits (1.05–1.57×, plus the 1.2614× default) are all no-drop.
+The bank/held-out fit (0.690× on unseen episodes) is a different protocol
+and is not evidence for the executor stream. Two disclosures on the gate:
+production publishes cumulative adapted/base evidence only after
+`stale_patience`=2 applied ticks (one transient beneficial tick at frame 17
+would have passed a strict per-tick recorder at tick 18, sedimenting one
+D4 body — the patience rule prevents that), and the *passing* branch is
+exercised only by injected evidence, never by a real beneficial adaptation
+in this slice. Open limitations: #2, D1/D3 reads, patch persistence, and
+trigger-gating; full list in
+[phase4-5-design.md](phase4-5-design.md) §14.9.
 
 ## What each layer catches that the others cannot
 
